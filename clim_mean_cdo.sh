@@ -1,12 +1,24 @@
 #!/bin/bash
+#BATCH --partition=analysis
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=08:00:00
+#SBATCH --account=gfdl_w
+#SBATCH --job-name=clim_mean_cdo
+#SBATCH --chdir=.
+#SBATCH -o /home/Marc.Prange/work/AR-analysis/logs/%x.o%j
+#SBATCH -e /home/Marc.Prange/work/AR-analysis/logs/%x.e%j
 
-exp_name="c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020"
+module load cdo
+
+exp_name="c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day_p2K"
 obs_exp_name="c192_obs"
 outpath="/archive/Marc.Prange/clim_means/${exp_name}/"
 obs_outpath="/archive/Marc.Prange/clim_means/${obs_exp_name}/"
 
 freq="daily"
-base_path="/archive/Ming.Zhao/awg/2022.03/${exp_name}/gfdl.ncrc4-intel-prod-openmp/pp/"
+base_path="/archive/Ming.Zhao/awg/2023.04/${exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/pp/"
 land_path="${base_path}land/ts/${freq}/1yr/"
 land_cmip_path="${base_path}land_cmip/ts/${freq}/1yr/"
 atmos_cmip_path="${base_path}atmos_cmip/ts/${freq}/1yr/"
@@ -22,12 +34,12 @@ river_vars=("rv_o_h2o" "rv_d_h2o")
 obs_vars=("prw" "ivtx" "ivty")
 
 
-# for var in ${atmos_cmip_vars[@]} ; do
-#     temppath=$(mktemp -d)
-#     cdo cat ${atmos_cmip_path}atmos_cmip.{1980..2019}0101-*1231.${var}.nc ${temppath}/data.nc
-#     cdo -timmean ${temppath}/data.nc ${outpath}${exp_name}_1980-2019_mean.${var}.nc
-#     rm -rf ${temppath}
-# done
+for var in ${atmos_cmip_vars[@]} ; do
+    temppath=$(mktemp -d)
+    cdo cat ${atmos_cmip_path}atmos_cmip.{1980..2019}0101-*1231.${var}.nc ${temppath}/data.nc
+    cdo -timmean ${temppath}/data.nc ${outpath}${exp_name}_1980-2019_mean.${var}.nc
+    rm -rf ${temppath}
+done
 
 for var in ${atmos_cmip_6hr_vars[@]} ; do
     temppath=$(mktemp -d)
