@@ -10,6 +10,7 @@ import os
 from glob import glob
 from skimage.measure import find_contours
 
+import processing as arp
 
 def error_corr_map(model_data, era5_data):
     ivt_abs_model = np.sqrt(model_data.ivtx**2 + model_data.ivty**2)
@@ -58,16 +59,16 @@ def error_corr_map(model_data, era5_data):
 def plot_ivt_ar_shape(fig, ax, data, rain_contour=False):
     ivt_abs = np.sqrt(data.ivtx**2 + data.ivty**2)
     c1 = ax.pcolormesh(
-        data.lon, data.lat, data.ar_shape, cmap='Paired', alpha=0.5)
+        data.lon, data.lat, data.ar_shape, cmap='Greys_r', alpha=0.2)
     if rain_contour:
-        ax.contour(data.lon, data.lat, data.pr, levels=np.arange(10, 55, 5), cmap='jet', linewidth=0.7)
-    c2 = ax.quiver(
+        c2 = ax.contour(data.lon, data.lat, data.pr*86400, levels=np.arange(10, 80, 5), cmap='winter_r', linewidth=0.4)
+    c3 = ax.quiver(
         data.lon[::4], data.lat[::4], 
         data.ivtx.where(np.logical_and(ivt_abs>100, data.ivtx>0))[::4, ::4], 
         data.ivty.where(np.logical_and(ivt_abs>100, data.ivtx>0))[::4, ::4], 
         animated=True, scale=1500, scale_units='inches', width=0.002, alpha=0.8)
-    qk = ax.quiverkey(c2, 0.7, 1.05, 250, r'250 $\mathrm{kg\,m\,s^{-1}}$', labelpos='E')
-    return fig, ax
+    # qk = ax.quiverkey(c2, 0.7, 1.05, 250, r'250 $\mathrm{kg\,m\,s^{-1}}$', labelpos='E')
+    return fig, ax, c2
 
 def plot_bias_map(fig, ax, model_data, ref_data, quiver_data, var, cb_props, rel_error=False, mask_ar=False):
     if var == 'ivt':
@@ -254,22 +255,23 @@ def plot_runoff_timeseries_sharc(sharc_data, obs_data_loc):
 def _main():
     base_path = '/archive/Ming.Zhao/awg/2022.03/'
     year = 2016
-    model_data = load_model_data(base_path, year, ['prw', 'pr', 'ivtx', 'ivty'], ar_analysis=True)
-    model_data['pr'] = model_data.pr * 86400
-    model_ar_data = load_ar_data(base_path, 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020', year)
-    model_ar_data = lon_360_to_180(model_ar_data)
-    model_ar_data = model_ar_data.assign_coords({'lat': model_data.lat, 'lon': model_data.lon})
-    model_data['ar_shape'] = daily_ar_shape(model_ar_data, model_data.time)
+    model_data = arp.load_model_data(
+        base_path, year, variables=['prw', 'pr', 'prsn', 'ivtx', 'ivty'], 
+        exp_name='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020', 
+        ar_analysis=True)
+    model_data_p2K = arp.load_model_data(
+        base_path='/archive/Ming.Zhao/awg/2023.04/', year=year, 
+        variables=['prw', 'pr', 'prsn', 'ivtx', 'ivty'], 
+        exp_name='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day_p2K', 
+        gfdl_processor='gfdl.ncrc5-intel23-classic-prod-openmp',
+        ar_analysis=True)
     
-    era5_data = load_era5_data(base_path, '2016', ['ivtx', 'ivty', 'prw'], ar_analysis=True)
-    era5_ar_data = load_ar_data(base_path, 'c192_obs', year)
-    era5_ar_data = lon_360_to_180(era5_ar_data)
-    era5_data['ar_shape'] = daily_ar_shape(era5_ar_data, era5_data.time)
-    obs_pr_data = load_pr_obs_data(base_path, 'c192_obs', year)
-    obs_pr_data = lon_360_to_180(obs_pr_data)
-    era5_data = xr.merge([era5_data, obs_pr_data]).rename({'precipitation': 'pr'})
-    model_data = sel_na_westcoast(model_data)
-    era5_data = sel_na_westcoast(era5_data)
+    era5_data = arp.load_era5_data(
+        base_path, year=2016, variables=['ivtx', 'ivty', 'prw'], 
+        ar_analysis=True, mswep_precip=True, exp_name='c192_obs')
+    model_data = arp.sel_na_pacific(model_data)
+    model_data_p2K = arp.sel_na_pacific(model_data_p2K)
+    era5_data = arp.sel_na_pacific(era5_data)
     # fig, ax = error_corr_map(model_data, era5_data)
     # fig.suptitle(f'{}', x=0.5, y=0.95)
     # plt.subplots_adjust(hspace=0.1, wspace=0.1)
@@ -278,13 +280,43 @@ def _main():
     #     dpi=300, bbox_inches='tight')
 
    
-    for day in np.arange('2016-01-01', '2016-02-01', dtype='datetime64[D]'):
-        fig, ax1, ax2, ax3, ax4 = plot_ivt_bias_rr(
-            model_data.sel(time=day, method='nearest').squeeze(), 
-            era5_data.sel(time=day, method='nearest').squeeze())
+    for day in np.arange('2016-01-21', '2016-01-22', dtype='datetime64[D]'):
+        fig = plt.figure(figsize=(15, 5))
+        ax1 = fig.add_subplot(131, projection=ccrs.PlateCarree())
+        fig, ax1, c1 = plot_ivt_ar_shape(fig, ax1, model_data.sel(time=day, method='nearest').squeeze(), rain_contour=True)
+        ax1.set(title='AM4')
+        ax2 = fig.add_subplot(132, projection=ccrs.PlateCarree())
+        fig, ax2, c2 = plot_ivt_ar_shape(fig, ax2, era5_data.sel(time=day, method='nearest').squeeze(), rain_contour=True)
+        ax2.set(title='Observations (ERA5/MSWEP)')
+        ax3 = fig.add_subplot(133, projection=ccrs.PlateCarree())
+        fig, ax3, c3 = plot_ivt_ar_shape(fig, ax3, model_data_p2K.sel(time=day, method='nearest').squeeze(), rain_contour=True)
+        ax3.set(title='AM4 with 2K warming')
+        # fig, ax1, ax2, ax3, ax4 = plot_ivt_bias_rr(
+        #     model_data.sel(time=day, method='nearest').squeeze(), 
+        #     era5_data.sel(time=day, method='nearest').squeeze())
         fig.suptitle(f'{str(day)}', x=0.5, y=0.95)
         # plt.subplots_adjust(hspace=0.1, wspace=0.1)
-        plt.savefig(f'/home/Marc.Prange/work/AR-analysis/plots/AR_ivt_bias_map_{str(day)}.png', dpi=300, bbox_inches='tight')
+        for axis in [ax1, ax2, ax3]:
+            axis.set_extent([-170, -105, 20, 60], crs=ccrs.PlateCarree())
+            axis.coastlines("10m", linewidth=0.5)
+            # axis.add_feature(cfeature.LAKES.with_scale('10m'), facecolor='tab:blue', edgecolor='tab:blue', linewidth=0.5)
+            # axis.add_feature(cfeature.RIVERS.with_scale('10m'), edgecolor='tab:blue', linewidth=0.5)
+            axis.add_feature(cfeature.BORDERS.with_scale('10m'), edgecolor='black', linewidth=0.5)
+            states_provinces = cfeature.NaturalEarthFeature(
+                category='cultural',
+                name='admin_1_states_provinces_lines',
+                scale='50m',
+                facecolor='none')
+            axis.add_feature(states_provinces, edgecolor='black', linewidth=0.5)
+        norm= matplotlib.colors.Normalize(vmin=c3.cvalues.min(), vmax=c3.cvalues.max())
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=c3.cmap)
+        sm.set_array([])
+        cbar_ax = fig.add_axes([0.1, 0.1, 0.7, 0.05])
+        fig.colorbar(sm, cax=cbar_ax, label='Precipitation / mm day$^{-1}$', orientation='horizontal', ticks=c3.levels)
+        plt.tight_layout()
+        plt.savefig(
+            f'/home/Marc.Prange/work/AR-analysis/plots/egu/AR_ivt_precip_map_ctrl_obs_warming_{str(day)}.pdf', 
+            dpi=300, bbox_inches='tight')
 
 
 if __name__ == '__main__':
