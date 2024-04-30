@@ -57,6 +57,20 @@ def lon_360_to_180(ds):
     ds = ds.sortby('lon')
     return ds
 
+def lon_180_to_360(ds):
+    """
+    Converts longitudes from -180-180 to 0-360.
+
+    Parameters:
+    - ds (xarray.Dataset or xarray.DataArray): Input dataset with longitude coordinates.
+
+    Returns:
+    - xarray.Dataset or xarray.DataArray: Dataset or DataArray with converted longitudes.
+    """
+    ds['lon'] = xr.where(ds.lon < 0, ds.lon + 360, ds.lon)
+    ds = ds.sortby('lon')
+    return ds
+
 def sel_na_pacific(ds):
     """
     Selects data within the North Pacific region.
@@ -367,6 +381,24 @@ def store_yearly_NA_model_data(
     model_data_na.to_netcdf(
         f'{dir}{exp_name}_na_{year}.nc')
 
+def store_yearly_NA_obs_data(
+        year,
+        base_path='/archive/Ming.Zhao/awg/2022.03/', 
+        exp_name='c192_obs',
+        out_base_path='/archive/Marc.Prange/',
+        variables=['prw', 'ivtx', 'ivty'],
+        ar_analysis=True, mswep_precip=True):
+    print(f'Loading obs data for {year}...', flush=True)
+    obs_data = load_era5_data(
+        base_path, year, 
+        variables=variables, mswep_precip=mswep_precip, exp_name=exp_name,ar_analysis=ar_analysis)
+    obs_data_na = sel_na(obs_data)
+    print(f'Storing NA data for {year}...', flush=True)
+    dir = f'{out_base_path}/na_data/{exp_name}/'
+    Path(dir).mkdir(parents=True, exist_ok=True)
+    obs_data_na.to_netcdf(
+        f'{dir}{exp_name}_na_{year}.nc')
+
 def store_loc_obs_data(
         start_year, end_year, 
         loc_lon, loc_lat,
@@ -480,11 +512,21 @@ def store_loc_composite_ds(start_year, end_year, loc_name, base_path, exp_name, 
     comp_data.to_netcdf(
         dir+f'{exp_name}_{loc_name}_{ar_str}_min_precip_{min_precip}_{start_year}-{end_year}_temporal_composite.nc')
 
-def store_sharc_composite_ds(start_year, end_year, base_path, exp_name, min_precip, ar_day, precip_var='pr', winter=False):
+def store_sharc_composite_ds(start_year, end_year, base_path, exp_name, min_precip, ar_day, ar_exp=None, precip_var='pr', winter=False):
     data = xr.concat(
         [load_daily_sharc_data(base_path, exp_name, year) for year in range(start_year, end_year+1)],
         dim='time')
     data['pr'] = data.lprec + data.fprec
+    if ar_day & (ar_exp is not None):
+        ar_data = xr.open_mfdataset(
+            f'/archive/Marc.Prange/clearwater_data/{ar_exp}/'
+            f'{ar_exp}_clearwater_*.nc').sel(
+                time=data.time - np.timedelta64(12, 'h'))
+        data = data.assign(
+            {
+                'ar_shape': (('time'), ar_data.ar_shape.values),
+                'time': ar_data.time,
+                })
     precip_days = get_strong_precip_days(data, min_precip, ar_day, precip_var, winter) 
     comp_data = create_temporal_composite_ds(data, precip_days)
     dir = f'{base_path}/{exp_name}/precip_composite/'
@@ -603,24 +645,48 @@ def store_na_temporal_comp_for_lon_range(
             f'{np.round(lon_min, 2)}-{np.round(lon_max, 2)}.nc',)
 
 def _main():
-    # na_data = xr.open_mfdataset(
+    na_data_obs = xr.open_mfdataset(
+        '/archive/Marc.Prange/na_data/c192_obs/'
+        'c192_obs_na_*.nc').load()
+    # na_data_model = xr.open_mfdataset(
     #     '/archive/Marc.Prange/na_data/c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020/'
     #     'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020_na_*.nc').load()
-    # store_loc_model_data(
-    #     start_year=2020, end_year=2021, 
-    #     loc_lat=45.515, loc_lon=-122.678,
-    #     loc_name='portland',
-    #     model_data=na_data,
-    #     base_path='/archive/Marc.Prange/', 
-    #     exp_name='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020',
-    #     out_base_path='/archive/Marc.Prange/',)
-    # store_loc_composite_ds(
-    #     start_year=1990, end_year=2019, 
-    #     loc_name='portland', 
-    #     base_path='/archive/Marc.Prange/', 
-    #     exp_name='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020', 
-    #     min_precip=20, 
-    #     ar_day=False)
+    # na_data_model_p2K = xr.open_mfdataset(
+    #     '/archive/Marc.Prange/na_data/c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day_p2K/'
+    #     'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day_p2K_na_*.nc').load()
+    # loc_data = na_data_obs.sel({'lon': -123.93, 'lat': 47.72}, method='nearest')
+    # precip_days = get_strong_precip_days(loc_data, min_precip=0, ar_day=True, precip_var='pr', winter=False)
+    # comp_data = create_temporal_composite_ds(na_data_obs, precip_days, days_back=5, days_ahead=5, min_days_between_events=3)
+    # comp_data['loc_lat'] = loc_data.lat
+    # comp_data['loc_lon'] = loc_data.lon
+    # comp_data.to_netcdf(
+    #     '/archive/Marc.Prange/na_data/c192_obs/'
+    #     'temporal_composite/clearwater_na_composite_test.nc'
+    # )
+    store_loc_model_data(
+        start_year=1990, end_year=2020, 
+        loc_lat=47.72, loc_lon=-123.93,
+        loc_name='clearwater',
+        model_data=na_data_obs,
+        base_path='/archive/Marc.Prange/', 
+        exp_name='c192_obs',
+        out_base_path='/archive/Marc.Prange/',)
+    store_loc_composite_ds(
+        start_year=1980, end_year=2014, 
+        loc_name='clearwater', 
+        base_path='/archive/Marc.Prange/', 
+        exp_name='c192_obs', 
+        min_precip=0, 
+        ar_day=True)
+
+    # store_sharc_composite_ds(
+    #     start_year=1979, end_year=2014, 
+    #     base_path='/archive/Marc.Prange/LM4p2_SHARC', 
+    #     exp_name='clearwater_lm4sharc_ksat002_angle087rad_ep20_114y', 
+    #     min_precip=0, 
+    #     ar_day=True, 
+    #     ar_exp='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020',
+    #     precip_var='pr', winter=False)
     # na_data = xr.open_mfdataset(
     #     '/archive/Marc.Prange/na_data/c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020/'
     #     'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020_na_*.nc').load()
@@ -636,17 +702,17 @@ def _main():
     #     lon_min=-130,
     #     lon_max=-129)
     # temporal_composite_ds_mean_for_precip(data_loc, min_precip=20, ar_day=False)
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--year", type=int, default=1990)
-    args = parser.parse_args()
-    store_yearly_NA_model_data(
-        args.year,
-        base_path='/archive/Ming.Zhao/awg/2023.04/', 
-        exp_name='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day_p2K',
-        out_base_path='/archive/Marc.Prange/',
-        gfdl_processor='gfdl.ncrc5-intel23-classic-prod-openmp',
-        variables=['ts', 'prw', 'pr', 'prsn', 'ivtx', 'ivty', 'mrro', 'mrsos', 'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'],
-        ar_analysis=True)
-
+    # for year in range(1979, 1980):
+    #     parser = argparse.ArgumentParser()
+    #     parser.add_argument("--year", type=int, default=year)
+    #     args = parser.parse_args()
+    #     store_yearly_NA_obs_data(
+    #     year,
+    #     base_path='/archive/Ming.Zhao/awg/2022.03/', 
+    #     exp_name='c192_obs',
+    #     out_base_path='/archive/Marc.Prange/',
+    #     variables=['prw', 'ivtx', 'ivty'],
+    #     ar_analysis=True, mswep_precip=True)
+    
 if __name__ == '__main__':
     _main()
