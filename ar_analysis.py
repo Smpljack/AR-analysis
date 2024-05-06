@@ -10,7 +10,7 @@ import os
 from glob import glob
 from skimage.measure import find_contours
 
-import processing as arp
+import data_util as arp
 
 def error_corr_map(model_data, era5_data):
     ivt_abs_model = np.sqrt(model_data.ivtx**2 + model_data.ivty**2)
