@@ -154,8 +154,8 @@ def store_sharc_composite_ds(
                 'ar_shape': (('time'), ar_data.ar_shape.values),
                 'time': ar_data.time,
                 })
-    precip_days = du.get_strong_precip_days(
-        data, min_precip, ar_day, precip_var, winter) 
+    precip_days = get_strong_precip_days(
+        data, min_precip, ar_day, precip_var, winter)
     comp_data = create_temporal_composite_ds(data, precip_days)
     dir = f'{base_path}/{exp_name}/precip_composite/'
     Path(dir).mkdir(parents=True, exist_ok=True)
@@ -222,7 +222,7 @@ def store_loc_composite_ds(
 
 def get_strong_precip_days(
     data, min_precip=30, ar_day=True, precip_var='pr', winter=False):
-    filter = (data[f'{precip_var}'] > min_precip/86400)
+    filter = (data[f'{precip_var}'] >= min_precip/86400)
     if ar_day:
         filter &= (data.ar_shape == 1)
     if winter:
@@ -313,3 +313,21 @@ def store_na_temporal_comp_for_lon_range(
             f'{exp_name}_na_{ar_str}_min_{precip_var}_{min_precip}_'
             f'1990-2020_temporal_composite_mean_{winter_str}_lon_'
             f'{np.round(lon_min, 2)}-{np.round(lon_max, 2)}.nc',)
+
+            
+            
+def _main():
+    print('First command.')
+    store_sharc_composite_ds(
+        start_year=1980,
+        end_year=2014,
+        base_path='/archive/Marc.Prange/LM4p2_SHARC', 
+        exp_name='clearwater_lm4sharc_ksat001_angle000_ep10_thck5m_114y', 
+        min_precip=0, 
+        ar_day=True, 
+        ar_exp='c192_obs',
+        precip_var='pr', winter=False)
+    
+    
+if __name__ == '__main__':
+    _main()
