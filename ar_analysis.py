@@ -1,16 +1,14 @@
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
-import matplotlib
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 import cv2
 import os
 from glob import glob
-from skimage.measure import find_contours
+import pandas as pd
 
-import data_util as arp
+import data_util as du
 
 def error_corr_map(model_data, era5_data):
     ivt_abs_model = np.sqrt(model_data.ivtx**2 + model_data.ivty**2)
@@ -252,72 +250,422 @@ def plot_runoff_timeseries_sharc(sharc_data, obs_data_loc):
     return fig, axs
 
 
-def _main():
-    base_path = '/archive/Ming.Zhao/awg/2022.03/'
-    year = 2016
-    model_data = arp.load_model_data(
-        base_path, year, variables=['prw', 'pr', 'prsn', 'ivtx', 'ivty'], 
-        exp_name='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020', 
-        ar_analysis=True)
-    model_data_p2K = arp.load_model_data(
-        base_path='/archive/Ming.Zhao/awg/2023.04/', year=year, 
-        variables=['prw', 'pr', 'prsn', 'ivtx', 'ivty'], 
-        exp_name='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day_p2K', 
-        gfdl_processor='gfdl.ncrc5-intel23-classic-prod-openmp',
-        ar_analysis=True)
+def plot_AR_stat_diff_map(
+    ref_data, dist_data, ref_data_label, dist_data_label, 
+    plot_vars, abs_rel_diff, region='global', significance=1, ref_std=False):
+    unit_str = {
+        # PRECIP
+        'pr': 'mm day$^{-1}$',
+        'pr_diff_abs': 'mm day$^{-1}$ K$^{-1}$',
+        'pr_diff_rel': '% K$^{-1}$',
+        # RAIN
+        'prli': 'mm day$^{-1}$',
+        'prli_diff_abs': 'mm day$^{-1}$ K$^{-1}$',
+        'prli_diff_rel': '% K$^{-1}$',
+        # SNOW
+        'prsn': 'mm day$^{-1}$',
+        'prsn_diff_abs': 'mm day$^{-1}$ K$^{-1}$',
+        'prsn_diff_rel': '% K$^{-1}$',
+        # DISCHARGE
+        'rv_o_h2o': 'mm day$^{-1}$',
+        'rv_o_h2o_diff_abs': 'mm day$^{-1}$ K$^{-1}$',
+        'rv_o_h2o_diff_rel': '% K$^{-1}$',
+        # EVAPORATION
+        'evap_land': 'mm day$^{-1}$',
+        'evap_land_diff_abs': 'mm day$^{-1}$ K$^{-1}$',
+        'evap_land_diff_rel': '% K$^{-1}$',
+        # RUNOFF
+        'mrro': 'mm day$^{-1}$',
+        'mrro_diff_abs': 'mm day$^{-1}$ K$^{-1}$',
+        'mrro_diff_rel': '% K$^{-1}$',
+    }
+    var_scaling = {
+        # PRECIP
+        'pr': 86400,
+        'pr_diff_abs': 86400,
+        'pr_diff_rel': 1,
+        # RAIN
+        'prli': 86400,
+        'prli_diff_abs': 86400,
+        'prli_diff_rel': 1,
+        # SNOW
+        'prsn': 86400,
+        'prsn_diff_abs': 86400,
+        'prsn_diff_rel': 1,
+        # DISCHARGE
+        'rv_o_h2o': 86400,
+        'rv_o_h2o_diff_abs': 86400,
+        'rv_o_h2o_diff_rel': 1, 
+        # EVAPORATION
+        'evap_land': 86400,
+        'evap_land_diff_abs': 86400,
+        'evap_land_diff_rel': 1,  
+        # RUNOFF
+        'mrro': 86400,
+        'mrro_diff_abs': 86400,
+        'mrro_diff_rel': 1,
+    }
+    var_ref_vmin_vmax = {
+        # PRECIP
+        'pr': [0, 15],
+        'pr_diff_abs': [-2, 2],
+        'pr_diff_rel': [-8, 8],
+        # RAIN
+        'prli': [0, 15],
+        'prli_diff_abs': [-2, 2],
+        'prli_diff_rel': [-30, 30],
+        # SNOW
+        'prsn': [0, 15],
+        'prsn_diff_abs': [-2, 2],
+        'prsn_diff_rel': [-50, 50],
+        # DISCHARGE
+        'rv_o_h2o': [0, 50],
+        'rv_o_h2o_diff_abs': [-5, 5],
+        'rv_o_h2o_diff_rel': [-50, 50],
+        # EVAPORATION
+        'evap_land': [0, 3],
+        'evap_land_diff_abs': [-0.3, 0.3],
+        'evap_land_diff_rel': [-20, 20],
+        # RUNOFF
+        'mrro': [0, 2.5],
+        'mrro_diff_abs': [-0.3, 0.3],
+        'mrro_diff_rel': [-30, 30],
+    }
+    var_cmap = {
+        'pr': 'Blues',
+        'prli': 'Blues',
+        'prsn': 'Blues',
+        'rv_o_h2o': 'Blues',
+        'evap_land': 'Blues',
+        'mrro': 'Blues'
+    }
+    if region == 'NA':
+        ref_data = du.sel_na(ref_data)
+        dist_data = du.sel_na(dist_data)
+    dT = dist_data.ts - ref_data.ts
+    if abs_rel_diff == 'abs':
+        norm = dT
+    nvars = len(plot_vars)
+    fig = plt.figure(figsize=(10, 3*nvars))
+    axs = []
+    for ivar, var in enumerate(plot_vars):
+        ivar += 1
+        if abs_rel_diff == 'rel':
+            norm = dT * ref_data[var] / 100
+        ax1 = fig.add_subplot(int(f"{nvars}2{2*ivar-1}"), projection=ccrs.PlateCarree())
+        levels = np.linspace(
+                var_ref_vmin_vmax[var][0], var_ref_vmin_vmax[var][1], 20)
+        cf1 = ax1.contourf(
+            ref_data.lon, ref_data.lat, 
+            ref_data[var]*var_scaling[var], 
+            levels=levels, 
+            cmap=var_cmap[var], extend='both')
+        cb1 = plt.colorbar(
+            cf1, label=f'{ref_data_label} {var} / {unit_str[var]}', shrink=0.6,
+            orientation='horizontal', pad=0.05)
+        cb1.ax.set_xticks(np.arange(levels[0], levels[-1]+np.diff(levels)[-1], (levels[-1]-levels[0])/5))
+        axs.append(ax1)
+        
+        if significance > 0:
+            # Apply z-test
+            z = (dist_data[var] - ref_data[var]) / dT / ref_std[var]
+            dist_data[var] = dist_data[var].where(np.abs(z) > significance)
+            ref_data[var] = ref_data[var].where(np.abs(z) > significance)
+        ax2 = fig.add_subplot(int(f"{nvars}2{2*ivar}"), projection=ccrs.PlateCarree())
+        levels = np.linspace(
+                var_ref_vmin_vmax[var+f'_diff_{abs_rel_diff}'][0],
+                var_ref_vmin_vmax[var+f'_diff_{abs_rel_diff}'][1], 20)
+        cf2 = ax2.contourf(
+            ref_data.lon, ref_data.lat, 
+            (dist_data[var] - ref_data[var])/norm*var_scaling[f'{var}_diff_{abs_rel_diff}'], 
+            levels=levels, 
+            cmap='coolwarm', extend='both')
+        cb2 = plt.colorbar(
+            cf2, 
+            label=f'$\Delta_{{{abs_rel_diff}}}${dist_data_label}-{ref_data_label} {var} / ' 
+                  f'{unit_str[var+f"_diff_{abs_rel_diff}"]}', shrink=0.6, pad=0.05,
+            orientation='horizontal',)
+
+        cb2.ax.set_xticks(np.arange(levels[0], levels[-1]+np.diff(levels)[-1], (levels[-1]-levels[0])/5))
+        axs.append(ax2)
+
+    [ax.coastlines("50m", linewidth=0.5) for ax in axs]
+    [ax.add_feature(cfeature.BORDERS.with_scale('10m'), edgecolor='black', linewidth=0.5) for ax in axs]
+    states_provinces = cfeature.NaturalEarthFeature(
+            category='cultural',
+            name='admin_1_states_provinces_lines',
+            scale='50m',
+            facecolor='none')
+    [ax.add_feature(states_provinces, edgecolor='black', linewidth=0.5) for ax in axs]
+    plt.tight_layout()
+    return fig, axs
+
+def plot_ar_frequency_diff_map(
+    ref_data, dist_data, ref_data_label, dist_data_label, dT,
+    start_year, end_year, abs_rel_diff, region='global', significance=True):
+    if region == 'NA':
+        ref_data = du.sel_na(ref_data)
+        dist_data = du.sel_na(dist_data)
+    n_days = len(np.arange(f"{start_year}-01-01", f"{end_year+1}-01-01", dtype='datetime64[D]'))
+    fig = plt.figure(figsize=(10, 3))
+    ax1 = fig.add_subplot(121, projection=ccrs.PlateCarree())
+    levels = np.linspace(0, 25, 20)
+    cf1 = ax1.contourf(
+        ref_data.lon, ref_data.lat, 
+        (ref_data.sum('time')/n_days)*100, 
+        levels=levels, cmap='viridis', extend='both')
+    cb1 = plt.colorbar(
+        cf1, label=f'{ref_data_label} AR freq / %', orientation='horizontal', ax=ax1, 
+        pad=0.05, shrink=0.6)
+    cb1.ax.set_xticks(np.arange(levels[0], levels[-1]+np.diff(levels)[-1], (levels[-1]-levels[0])/5))
+    if abs_rel_diff == 'abs':
+        norm = dT * n_days / 100
+        levels = np.arange(-5, 5.5, 0.5)
+    elif abs_rel_diff == 'rel':
+        norm = dT * ref_data.sum('time') / 100
+        levels = np.arange(-30, 33, 3)
+    ax2 = fig.add_subplot(122, projection=ccrs.PlateCarree())
+    cf2 = ax2.contourf(
+        ref_data.lon, dist_data.lat, 
+        (dist_data.sum('time') - ref_data.sum('time'))/norm, 
+        levels=levels, cmap='coolwarm', extend='both')
+    c1 = ax2.contour(
+        ref_data.lon, dist_data.lat, 
+        (ref_data.sum('time')/n_days), 
+        levels=5, colors='gray', linewidths=0.7)
+    cb2 = plt.colorbar(
+        cf2, label=f'$\Delta_{{{abs_rel_diff}}}${dist_data_label}-{ref_data_label}'
+                     ' AR freq / % K$^{-1}$', 
+        orientation='horizontal', ax=ax2, pad=0.05, shrink=0.6)
+    cb2.ax.set_xticks(np.arange(levels[0], levels[-1]+np.diff(levels)[-1], (levels[-1]-levels[0])/5))
+    ax1.coastlines("50m", linewidth=0.5)
+    ax2.coastlines("50m", linewidth=0.5)
+    axs = [ax1, ax2]
+    [ax.add_feature(cfeature.BORDERS.with_scale('10m'), edgecolor='black', linewidth=0.5) for ax in axs]
+    states_provinces = cfeature.NaturalEarthFeature(
+            category='cultural',
+            name='admin_1_states_provinces_lines',
+            scale='50m',
+            facecolor='none')
+    [ax.add_feature(states_provinces, edgecolor='black', linewidth=0.5) for ax in axs]
+    plt.tight_layout()
+    return fig, axs
+
+def plot_clim_wind_diff_maps(
+    ref_data, dist_data, ref_data_label, dist_data_label, region='global',): 
+    if region == 'NA':
+        ref_data = du.sel_na(ref_data)
+        dist_data = du.sel_na(dist_data)
+    ref_data['windspeed'] = np.sqrt(ref_data.u_ref**2 + ref_data.v_ref**2)
+    dist_data['windspeed'] = np.sqrt(dist_data.u_ref**2 + dist_data.v_ref**2)
+
+    fig = plt.figure(figsize=(8, 7))
+    ax1 = fig.add_subplot(221, projection=ccrs.PlateCarree())
+    cf1 = ax1.contourf(
+        ref_data.lon, ref_data.lat, 
+        ref_data.windspeed, 
+        levels=np.arange(0, 7.65, 0.15), cmap='viridis', extend='both')
+    if region == 'global':
+        dq = 10
+    elif region == 'NA':
+        dq = 5
+    qu1 = ax1.quiver(
+        ref_data.lon[::dq], ref_data.lat[::dq], 
+        ref_data.u_ref[::dq, ::dq], ref_data.v_ref[::dq, ::dq],
+        )
+    cb1 = plt.colorbar(
+        cf1, label=f'{ref_data_label} 10 m winds '+ '/ m s$^{-1}$', orientation='horizontal', ax=ax1, 
+        pad=0.05, shrink=0.6)
+    ax2 = fig.add_subplot(222, projection=ccrs.PlateCarree())
+    cf2 = ax2.contourf(
+        dist_data.lon, dist_data.lat, 
+        dist_data.windspeed, 
+        levels=np.arange(0, 7.65, 0.15), cmap='viridis', extend='both')
+    qu2 = ax2.quiver(
+        dist_data.lon[::dq], dist_data.lat[::dq], 
+        dist_data.u_ref[::dq, ::dq], dist_data.v_ref[::dq, ::dq],
+        )
+    cb2 = plt.colorbar(
+        cf2, label=f'{dist_data_label} 10 m winds '+ '/ m s$^{-1}$', orientation='horizontal', ax=ax2, 
+        pad=0.05, shrink=0.6)
+    norm = 1
+    levels = np.arange(-1, 1.1, 0.1)
+    unit = 'm s$^{-1}$'
+    ax3 = fig.add_subplot(223, projection=ccrs.PlateCarree())
+    cf3 = ax3.contourf(
+        ref_data.lon, ref_data.lat, 
+        (dist_data.windspeed - ref_data.windspeed)/norm, 
+        levels=levels, cmap='coolwarm', extend='both')
+    qu3 = ax3.quiver(
+        ref_data.lon[::5], ref_data.lat[::5], 
+        dist_data.u_ref[::5, ::5] - ref_data.u_ref[::5, ::5], 
+        dist_data.v_ref[::5, ::5] - ref_data.v_ref[::5, ::5],
+        )
+    cb3 = plt.colorbar(
+        cf3, label=f'{dist_data_label}-{ref_data_label} 10 m winds / {unit}', orientation='horizontal', ax=ax3, 
+        pad=0.05, shrink=0.6)
+    norm = ref_data.windspeed / 100
+    levels = np.arange(-50, 53, 5)
+    unit = '%'
+    ax4 = fig.add_subplot(224, projection=ccrs.PlateCarree())
+    cf4 = ax4.contourf(
+        ref_data.lon, ref_data.lat, 
+        (dist_data.windspeed - ref_data.windspeed)/norm, 
+        levels=levels, cmap='coolwarm', extend='both')
+    qu4 = ax4.quiver(
+        ref_data.lon[::5], ref_data.lat[::5], 
+        dist_data.u_ref[::5, ::5] - ref_data.u_ref[::5, ::5], 
+        dist_data.v_ref[::5, ::5] - ref_data.v_ref[::5, ::5],
+        )
+    cb4 = plt.colorbar(
+        cf4, label=f'{dist_data_label}-{ref_data_label} 10 m winds / {unit}', orientation='horizontal', ax=ax4, 
+        pad=0.05, shrink=0.6)
+    # cb1.ax.set_xticks(np.arange(levels[0], levels[-1]+np.diff(levels)[-1], (levels[-1]-levels[0])/5))
+    axs = [ax1, ax2, ax3, ax4]
+    [ax.coastlines("50m", linewidth=0.5) for ax in axs]
+    [ax.add_feature(cfeature.BORDERS.with_scale('10m'), edgecolor='black', linewidth=0.5) for ax in axs]
+    states_provinces = cfeature.NaturalEarthFeature(
+            category='cultural',
+            name='admin_1_states_provinces_lines',
+            scale='50m',
+            facecolor='none')
+    [ax.add_feature(states_provinces, edgecolor='black', linewidth=0.5) for ax in axs]
+    plt.tight_layout()
+    return fig, axs
     
-    era5_data = arp.load_era5_data(
-        base_path, year=2016, variables=['ivtx', 'ivty', 'prw'], 
-        ar_analysis=True, mswep_precip=True, exp_name='c192_obs')
-    model_data = arp.sel_na_pacific(model_data)
-    model_data_p2K = arp.sel_na_pacific(model_data_p2K)
-    era5_data = arp.sel_na_pacific(era5_data)
-    # fig, ax = error_corr_map(model_data, era5_data)
-    # fig.suptitle(f'{}', x=0.5, y=0.95)
-    # plt.subplots_adjust(hspace=0.1, wspace=0.1)
-    # plt.savefig(
-    #     f'/home/Marc.Prange/work/AR-analysis/plots/AR_ivt_prw_error_corr_map_01_2016.png', 
-    #     dpi=300, bbox_inches='tight')
 
-   
-    for day in np.arange('2016-01-21', '2016-01-22', dtype='datetime64[D]'):
-        fig = plt.figure(figsize=(15, 5))
-        ax1 = fig.add_subplot(131, projection=ccrs.PlateCarree())
-        fig, ax1, c1 = plot_ivt_ar_shape(fig, ax1, model_data.sel(time=day, method='nearest').squeeze(), rain_contour=True)
-        ax1.set(title='AM4')
-        ax2 = fig.add_subplot(132, projection=ccrs.PlateCarree())
-        fig, ax2, c2 = plot_ivt_ar_shape(fig, ax2, era5_data.sel(time=day, method='nearest').squeeze(), rain_contour=True)
-        ax2.set(title='Observations (ERA5/MSWEP)')
-        ax3 = fig.add_subplot(133, projection=ccrs.PlateCarree())
-        fig, ax3, c3 = plot_ivt_ar_shape(fig, ax3, model_data_p2K.sel(time=day, method='nearest').squeeze(), rain_contour=True)
-        ax3.set(title='AM4 with 2K warming')
-        # fig, ax1, ax2, ax3, ax4 = plot_ivt_bias_rr(
-        #     model_data.sel(time=day, method='nearest').squeeze(), 
-        #     era5_data.sel(time=day, method='nearest').squeeze())
-        fig.suptitle(f'{str(day)}', x=0.5, y=0.95)
-        # plt.subplots_adjust(hspace=0.1, wspace=0.1)
-        for axis in [ax1, ax2, ax3]:
-            axis.set_extent([-170, -105, 20, 60], crs=ccrs.PlateCarree())
-            axis.coastlines("10m", linewidth=0.5)
-            # axis.add_feature(cfeature.LAKES.with_scale('10m'), facecolor='tab:blue', edgecolor='tab:blue', linewidth=0.5)
-            # axis.add_feature(cfeature.RIVERS.with_scale('10m'), edgecolor='tab:blue', linewidth=0.5)
-            axis.add_feature(cfeature.BORDERS.with_scale('10m'), edgecolor='black', linewidth=0.5)
-            states_provinces = cfeature.NaturalEarthFeature(
-                category='cultural',
-                name='admin_1_states_provinces_lines',
-                scale='50m',
-                facecolor='none')
-            axis.add_feature(states_provinces, edgecolor='black', linewidth=0.5)
-        norm= matplotlib.colors.Normalize(vmin=c3.cvalues.min(), vmax=c3.cvalues.max())
-        sm = plt.cm.ScalarMappable(norm=norm, cmap=c3.cmap)
-        sm.set_array([])
-        cbar_ax = fig.add_axes([0.1, 0.1, 0.7, 0.05])
-        fig.colorbar(sm, cax=cbar_ax, label='Precipitation / mm day$^{-1}$', orientation='horizontal', ticks=c3.levels)
-        plt.tight_layout()
+def plot_basic_ar_stat_warming_maps(
+    exp_name_ctrl, exp_name_warming, 
+    ctrl_label, warming_label, start_year, end_year, base_path='/archive/Marc.Prange/ar_masked_monthly_data/', 
+    min_precip=1, significance=1):
+    data_ctrl_ar_masked_sum = du.load_ar_day_avg_stat(
+        exp_name_ctrl, base_path, start_year, end_year, stat='sum', min_precip=min_precip)
+    data_warming_ar_masked_sum = du.load_ar_day_avg_stat(
+        exp_name_warming, base_path, start_year, end_year, stat='sum', min_precip=min_precip)
+    # data_ctrl_ar_masked_sum['prli'] = data_ctrl_ar_masked_sum.pr - data_ctrl_ar_masked_sum.prsn
+    # data_warming_ar_masked_sum['prli'] = data_warming_ar_masked_sum.pr - data_warming_ar_masked_sum.prsn
+    data_ctrl_ar_count = du.load_ar_day_avg_stat(
+        exp_name_ctrl, base_path, start_year, end_year, stat='count', min_precip=min_precip)
+    data_warming_ar_count = du.load_ar_day_avg_stat(
+        exp_name_warming, base_path, start_year, end_year, stat='count', min_precip=min_precip)
+    data_ctrl_ar_day_mean = (data_ctrl_ar_masked_sum / data_ctrl_ar_count).mean('time')
+    data_warming_ar_day_mean = (data_warming_ar_masked_sum / data_warming_ar_count).mean('time')
+    if significance > 0:
+        data_ctrl_ar_masked_std = du.load_ar_day_avg_stat(
+            exp_name_ctrl, base_path, start_year, end_year, stat='std', min_precip=min_precip)
+        # Get long-term standard deviation
+        std_ctrl_long = std_long_from_std_monthly(
+            data_ctrl_ar_masked_std, data_ctrl_ar_count, data_ctrl_ar_masked_sum / data_ctrl_ar_count)
+        # Get long-term standard error used for z-test
+        ste_ctrl_long= std_ctrl_long / np.sqrt(data_ctrl_ar_count.sum('time'))
+    days_in_month = xr.DataArray(
+        name='days_in_month',
+        coords={'time': data_ctrl_ar_masked_sum.time.values}, 
+        data=[pd.Period(str(date)).days_in_month for date in data_ctrl_ar_masked_sum.time.values])
+    data_ctrl_ar_all_day_mean = (data_ctrl_ar_masked_sum / days_in_month).mean('time')
+    data_warming_ar_all_day_mean = (data_warming_ar_masked_sum / days_in_month).mean('time')
+    # Load clim. mean winds
+    variables = ['u_ref', 'v_ref']
+    ref_paths = [p for p in glob(f'/archive/Ming.Zhao/awg/2022.03/{exp_name_ctrl}/ts_all/*.nc')
+                 if np.any([v in p for v in variables])]
+    dist_paths = [p for p in glob(f'/archive/Ming.Zhao/awg/2022.03/{exp_name_warming}/ts_all/*.nc')
+                 if np.any([v in p for v in variables])]
+    ref_data_winds = du.lon_360_to_180(xr.open_mfdataset(ref_paths).sel(
+        time=slice(f'{start_year}', f'{end_year}')).mean('time'))
+    dist_data_winds = du.lon_360_to_180(xr.open_mfdataset(dist_paths).sel(
+        time=slice(f'{start_year}', f'{end_year}')).mean('time'))
+
+    # CREATE WINTER DATASETS? 
+    plot_configs = {
+        'variables': [['pr', 'prli', 'prsn'], ['mrro', 'rv_o_h2o', 'evap_land']],
+        'weighting': ['ar_day', 'all_day'],
+        'region': ['global', 'NA'],
+        'abs_rel_diff': ['abs', 'rel'],
+    }
+
+    for region in plot_configs['region']:
+        plot_clim_wind_diff_maps(
+            ref_data_winds, dist_data_winds, ctrl_label, warming_label, region, )
         plt.savefig(
-            f'/home/Marc.Prange/work/AR-analysis/plots/egu/AR_ivt_precip_map_ctrl_obs_warming_{str(day)}.pdf', 
-            dpi=300, bbox_inches='tight')
+                    f'plots/ar_warming_stat_maps/{exp_name_warming}-{exp_name_ctrl}/'
+                    f'{ctrl_label}_{warming_label}_clim_wind_ref_{region}.png',
+                    dpi=300, bbox_inches='tight')
+        for abs_rel_diff in plot_configs['abs_rel_diff']:
+            dT = data_warming_ar_day_mean.ts - data_ctrl_ar_day_mean.ts
+            fig, axs = plot_ar_frequency_diff_map(
+                data_ctrl_ar_count, data_warming_ar_count, ctrl_label, warming_label, dT,
+                start_year, end_year, abs_rel_diff, region=region, significance=True)
+            plt.savefig(
+                        f'plots/ar_warming_stat_maps/{exp_name_warming}-{exp_name_ctrl}/'
+                        f'{ctrl_label}_{warming_label}_ar_freq_{abs_rel_diff}_{region}_{str(min_precip)}.png',
+                        dpi=300, bbox_inches='tight')
+            for variables in plot_configs['variables']:
+                for weighting in plot_configs['weighting']:
+                    if weighting == 'ar_day':
+                        plot_ctrl_data = data_ctrl_ar_day_mean
+                        plot_warming_data = data_warming_ar_day_mean
+                    if weighting == 'all_day':
+                        plot_ctrl_data = data_ctrl_ar_all_day_mean
+                        plot_warming_data = data_warming_ar_all_day_mean
+                    fig, axs = plot_AR_stat_diff_map(
+                        ref_data=plot_ctrl_data, 
+                        dist_data=plot_warming_data, 
+                        ref_data_label=ctrl_label, 
+                        dist_data_label=warming_label, 
+                        plot_vars=variables, 
+                        abs_rel_diff=abs_rel_diff, region=region, significance=significance, ref_std=ste_ctrl_long)
+                    plt.savefig(
+                        f'plots/ar_warming_stat_maps/{exp_name_warming}-{exp_name_ctrl}/'
+                        f'{ctrl_label}_{warming_label}_{"_".join("%s" % "".join(x) for x in variables)}'
+                        f'_{weighting}_{abs_rel_diff}_{region}_min_precip_{str(min_precip)}_significance_{significance}.png',
+                        dpi=300, bbox_inches='tight')
+    
+def std_long_from_std_monthly(std_monthly, N_monthly, mean_monthly):
+    """Calculate longterm 'mean' standard deviation from monthly stds.
 
+    Args:
+        std_monthly (xr.DataArray): Monthly std
+        N_monthly (xr.DataArray): Monthly sample size
+        mean_monthly (xr.DataArray): Monthly mean
+
+    Returns:
+        _type_: _description_
+    """
+    mean_long = (mean_monthly * N_monthly).sum('time') / N_monthly.sum('time')
+    std_long = np.sqrt(
+        ((std_monthly**2*(N_monthly-1)) + N_monthly*(mean_long - mean_monthly)**2).sum('time') / 
+                (N_monthly.sum('time') - 1))
+    return std_long
+
+
+def _main():
+    base_path = '/archive/Marc.Prange/ar_masked_monthly_data/'
+    exp_name_ctrl = 'c192L33_am4p0_amip_HIRESMIP_HX'
+    exp_name_dist = 'c192L33_am4p0_amip_HIRESMIP_HX_p2K'
+    start_year = 1980
+    end_year = 2019
+    plot_basic_ar_stat_warming_maps(
+        exp_name_ctrl, exp_name_dist, 'HX_ctrl', 'HX_p2K', 
+        start_year, end_year, base_path, min_precip=1, significance=1.96)
+    # variables = ['.u_ref.', '.v_ref.']
+    # ref_paths = [p for p in glob(f'/archive/Marc.Prange/era5_monthly/*.nc')
+    #             if np.any([v in p for v in variables])]
+    # dist_paths = [p for p in glob(f'{base_path}{exp_name_dist}/ts_all/*.nc')
+    #              if np.any([v in p for v in variables])]
+    # ref_data_winds = du.lon_360_to_180(xr.open_mfdataset(ref_paths).sel(
+    #     time=slice(f'{start_year}', f'{end_year}')).sel(
+    #         time=slice(str(start_year), str(end_year))).mean('time'))
+    # dist_data_winds = du.lon_360_to_180(xr.open_mfdataset(dist_paths).sel(
+    #     time=slice(f'{start_year}', f'{end_year}')).sel(
+    #         time=slice(str(start_year), str(end_year))).mean('time'))
+    # dist_data_winds['lon'] = ref_data_winds['lon']
+    # dist_data_winds['lat'] = ref_data_winds['lat']
+    # plot_clim_wind_diff_maps(
+    #         ref_data_winds, dist_data_winds, 'ERA5', 'nudged6hr_ctrl', 'global', )
+    # plt.savefig(
+    #             f'plots/ar_warming_stat_maps/{exp_name_dist}-{exp_name_ctrl}/'
+    #             f'ERA5_HX_ctrl_clim_wind_ref_global.png',
+    #             dpi=300, bbox_inches='tight')
 
 if __name__ == '__main__':
     _main()
