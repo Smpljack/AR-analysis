@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 import argparse
 from glob import glob
+import pandas as pd
 
 import comp_event_util as ceu
 
@@ -519,20 +520,82 @@ def store_monthly_mean_ar_masked_data(
                 f'{outpath}{exp_name}/{exp_name}_AR_masked_min_precip_{str(min_precip)}_monthly_max.{year}.{var}.nc'
             )
             
-def load_ar_day_avg_stat(exp_name, base_path, start_year, end_year, stat='mean', min_precip=1):
-    ar_count_paths = np.sort(
-            glob(f'{base_path}{exp_name}/{exp_name}_AR_count_min_precip_{str(min_precip)}_monthly.*.nc'))
-    ar_count_monthly = xr.open_mfdataset(
-        ar_count_paths).sel(time=slice(f'{start_year}', f'{end_year}')).ar_count.load()
+def load_ar_day_avg_stat(exp_name, base_path, start_year, end_year, stat='mean', min_precip=1, var='*'):
     if stat == 'count':
+        ar_count_paths = np.sort(
+            glob(f'{base_path}{exp_name}/{exp_name}_AR_count_monthly_min_precip_{str(min_precip)}.*.nc'))
+        ar_count_monthly = xr.open_mfdataset(
+            ar_count_paths, coords='minimal').sel(time=slice(f'{start_year}', f'{end_year}')).ar_count.load()
         return ar_count_monthly
     ar_masked_paths = np.sort(
-        glob(f'{base_path}{exp_name}/{exp_name}_AR_masked_min_precip_{str(min_precip)}_monthly_{stat}*.nc'))
+        glob(f'{base_path}{exp_name}/{exp_name}_AR_masked_min_precip_{str(min_precip)}_monthly_{stat}.*.{var}.nc'))
     ar_masked_monthly = xr.open_mfdataset(
-        ar_masked_paths).sel(time=slice(f'{start_year}', f'{end_year}')).load()
-    # ar_masked_mean = ar_masked_monthly.weighted(ar_count_monthly).mean('time')
+        ar_masked_paths, coords='minimal').sel(time=slice(f'{start_year}', f'{end_year}')).load()
     return ar_masked_monthly
-    
+
+def std_long_from_std_monthly(std_monthly, N_monthly, mean_monthly):
+    """Calculate longterm 'mean' standard deviation from monthly stds.
+
+    Args:
+        std_monthly (xr.DataArray): Monthly std
+        N_monthly (xr.DataArray): Monthly sample size
+        mean_monthly (xr.DataArray): Monthly mean
+
+    Returns:
+        _type_: _description_
+    """
+    mean_long = (mean_monthly * N_monthly).sum('time') / N_monthly.sum('time')
+    std_long = np.sqrt(
+        ((std_monthly**2*(N_monthly-1)) + N_monthly*(mean_long - mean_monthly)**2).sum('time') / 
+                (N_monthly.sum('time') - 1))
+    return std_long
+
+def store_ar_day_means(
+    exp_name, start_year, end_year, 
+    variables=['ts', 'prw', 'pr', 'prsn', 'prli','ivtx', 'ivty', 'wap500', 'mrro', 'mrsos',
+               'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'],
+    base_path='/archive/Marc.Prange/ar_masked_monthly_data/', 
+    min_precip=1):
+    print(f"Storing AR count for {start_year}-{end_year}", flush=True)
+    data_ar_count = load_ar_day_avg_stat(
+        exp_name, base_path, start_year, end_year, stat='count', min_precip=min_precip)
+    data_ar_count.to_netcdf(
+        f'{base_path}{exp_name}/ar_day_mean/'
+        f'{exp_name}_ar_count_min_precip_{min_precip}'
+        f'.{start_year}-{end_year}.nc'
+    )
+    for var in variables:
+        print(f"Storing AR day mean for: {var}\t{start_year}-{end_year}", flush=True)
+        data_ar_masked_sum = load_ar_day_avg_stat(
+            exp_name, base_path, start_year, end_year, stat='sum', min_precip=min_precip, var=var)
+        data_ctrl_ar_day_mean = (data_ar_masked_sum / data_ar_count).mean('time')
+        data_ctrl_ar_masked_std = load_ar_day_avg_stat(
+            exp_name, base_path, start_year, end_year, stat='std', min_precip=min_precip, var=var)
+        # Get long-term standard deviation
+        std_long = std_long_from_std_monthly(
+            data_ctrl_ar_masked_std, data_ar_count, data_ar_masked_sum / data_ar_count)
+        days_in_month = xr.DataArray(
+            name='days_in_month',
+            coords={'time': data_ar_masked_sum.time.values}, 
+            data=[pd.Period(str(date)).days_in_month for date in data_ar_masked_sum.time.values])
+        data_ctrl_ar_all_day_mean = (data_ar_masked_sum / days_in_month).mean('time')
+        # Store data
+        data_ctrl_ar_day_mean.to_netcdf(
+            f'{base_path}{exp_name}/ar_day_mean/'
+            f'{exp_name}_ar_day_mean_min_precip_{min_precip}'
+            f'.{start_year}-{end_year}.{var}.nc'
+        )
+        data_ctrl_ar_all_day_mean.to_netcdf(
+            f'{base_path}{exp_name}/ar_all_day_mean/'
+            f'{exp_name}_ar_all_day_mean_min_precip_{min_precip}'
+            f'.{start_year}-{end_year}.{var}.nc'
+        )
+        std_long.to_netcdf(
+            f'{base_path}{exp_name}/ar_day_mean/'
+            f'{exp_name}_ar_day_std_min_precip_{min_precip}'
+            f'.{start_year}-{end_year}.{var}.nc'
+        )
+
 def _main():
     # na_data_obs = xr.open_mfdataset(
     #     '/archive/Marc.Prange/na_data/c192_obs/'
@@ -604,17 +667,25 @@ def _main():
     #         #variables=['prw', 'ivtx', 'ivty'],
     #         ar_analysis=True)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp_name", type=str, default='c192L33_am4p0_amip_HIRESMIP_HX_p2K')
+    parser.add_argument("--exp_name", type=str, default='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020')
     args = parser.parse_args() 
-    store_monthly_mean_ar_masked_data(
-            exp_name=f'{args.exp_name}', 
-            base_path='/archive/Ming.Zhao/awg/2022.03/', 
-            variables=['pr', 'prsn'],
-            #['ts', 'prw', 'pr', 'prsn', 'ivtx', 'ivty', 'wap500', 'mrro', 'mrsos',
-                    #    'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'], 
-            start_year=1980, end_year=2019, 
-            gfdl_processor='gfdl.ncrc4-intel-prod-openmp',
-            min_precip=1)
+    # store_monthly_mean_ar_masked_data(
+    #         exp_name=f'{args.exp_name}', 
+    #         base_path='/archive/Ming.Zhao/awg/2023.04/', 
+    #         variables=['ts', 'prw', 'pr', 'prsn', 'ivtx', 'ivty', 'wap500',], #'mrro', 'mrsos',
+    #                     #'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'], 
+    #         start_year=1979, end_year=2020, 
+    #         gfdl_processor='gfdl.ncrc5-intel23-classic-prod-openmp',
+    #         min_precip=1)
+    store_ar_day_means(
+        exp_name=f'{args.exp_name}',
+        start_year=1980,
+        end_year=2019,
+        variables=['ts', 'prw', 'pr', 'prsn', 'prli', 'ivtx', 'ivty', 'wap500',], #'mrro', 'mrsos',
+                        #'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'], 
+        base_path='/archive/Marc.Prange/ar_masked_monthly_data/', 
+        min_precip=1
+    )
     # base_path = '/archive/Marc.Prange/ar_masked_monthly_data/'
     # exp_name_ctrl = 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day'
     # exp_name_p2K = 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day_p2K'
