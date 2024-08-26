@@ -542,7 +542,7 @@ def std_long_from_std_monthly(std_monthly, N_monthly, mean_monthly):
         mean_monthly (xr.DataArray): Monthly mean
 
     Returns:
-        _type_: _description_
+        xr.DataArray: Long-term standard deviation
     """
     mean_long = (mean_monthly * N_monthly).sum('time') / N_monthly.sum('time')
     std_long = np.sqrt(
@@ -550,12 +550,29 @@ def std_long_from_std_monthly(std_monthly, N_monthly, mean_monthly):
                 (N_monthly.sum('time') - 1))
     return std_long
 
+def std_long_from_std_monthly_for_ds(ds):
+    """Calculate longterm 'mean' standard deviation from monthly stds.
+
+    Args:
+        std_monthly (xr.DataSet): Contains three variables
+            1.) std: Monthly standard deviations.
+            2.) count: Monthly number of samples.
+            3.) mean: Monthly mean.
+    Returns:
+        xr.DataArray: Long-term standard deviation
+    """
+    mean_long = (ds['mean'] * ds['count']).sum('time') / ds['count'].sum('time')
+    std_long = np.sqrt(
+        ((ds['std']**2*(ds['count']-1)) + ds['count']*(mean_long - ds['mean'])**2).sum('time') / 
+                (ds['count'].sum('time') - 1))
+    return std_long
+
 def store_ar_day_means(
     exp_name, start_year, end_year, 
     variables=['ts', 'prw', 'pr', 'prsn', 'prli','ivtx', 'ivty', 'wap500', 'mrro', 'mrsos',
                'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'],
     base_path='/archive/Marc.Prange/ar_masked_monthly_data/', 
-    min_precip=1):
+    min_precip=1, monthly_means=True):
     print(f"Storing AR count for {start_year}-{end_year}", flush=True)
     data_ar_count = load_ar_day_avg_stat(
         exp_name, base_path, start_year, end_year, stat='count', min_precip=min_precip)
@@ -568,31 +585,52 @@ def store_ar_day_means(
         print(f"Storing AR day mean for: {var}\t{start_year}-{end_year}", flush=True)
         data_ar_masked_sum = load_ar_day_avg_stat(
             exp_name, base_path, start_year, end_year, stat='sum', min_precip=min_precip, var=var)
-        data_ctrl_ar_day_mean = (data_ar_masked_sum / data_ar_count).mean('time')
-        data_ctrl_ar_masked_std = load_ar_day_avg_stat(
-            exp_name, base_path, start_year, end_year, stat='std', min_precip=min_precip, var=var)
-        # Get long-term standard deviation
-        std_long = std_long_from_std_monthly(
-            data_ctrl_ar_masked_std, data_ar_count, data_ar_masked_sum / data_ar_count)
-        days_in_month = xr.DataArray(
-            name='days_in_month',
-            coords={'time': data_ar_masked_sum.time.values}, 
-            data=[pd.Period(str(date)).days_in_month for date in data_ar_masked_sum.time.values])
-        data_ctrl_ar_all_day_mean = (data_ar_masked_sum / days_in_month).mean('time')
+        if not monthly_means:
+            data_ctrl_ar_day_mean = (data_ar_masked_sum / data_ar_count).mean('time')
+            data_ctrl_ar_masked_std = load_ar_day_avg_stat(
+                exp_name, base_path, start_year, end_year, stat='std', min_precip=min_precip, var=var)
+            # Get long-term standard deviation
+            std_long = std_long_from_std_monthly(
+                data_ctrl_ar_masked_std, data_ar_count, data_ar_masked_sum / data_ar_count)
+            days_in_month = xr.DataArray(
+                name='days_in_month',
+                coords={'time': data_ar_masked_sum.time.values}, 
+                data=[pd.Period(str(date)).days_in_month for date in data_ar_masked_sum.time.values])
+            data_ctrl_ar_all_day_mean = (data_ar_masked_sum / days_in_month).mean('time')
+        else:
+            data_ctrl_ar_day_mean = (data_ar_masked_sum / data_ar_count).groupby('time.month').mean()
+            data_ctrl_ar_masked_std = load_ar_day_avg_stat(
+                exp_name, base_path, start_year, end_year, stat='std', min_precip=min_precip, var=var)
+            std_long_input_ds = xr.merge(
+                [data_ctrl_ar_masked_std.rename({f'{var}': 'std'}), 
+                 data_ar_count.rename('count'), 
+                 (data_ar_masked_sum/data_ar_count).rename({f'{var}': 'mean'})])
+            std_long = std_long_input_ds.groupby('time.month').map(std_long_from_std_monthly_for_ds)
+            days_in_month = xr.DataArray(
+                name='days_in_month',
+                coords={'time': data_ar_masked_sum.time.values}, 
+                data=[pd.Period(str(date)).days_in_month for date in data_ar_masked_sum.time.values])
+            data_ctrl_ar_all_day_mean = (data_ar_masked_sum / days_in_month).groupby('time.month').mean()
         # Store data
+        if monthly_means:
+            mean_type = 'monthly_mean'
+            std_type = 'monthly_std'
+        else:
+            mean_type = 'mean'
+            std_type = 'std'
         data_ctrl_ar_day_mean.to_netcdf(
             f'{base_path}{exp_name}/ar_day_mean/'
-            f'{exp_name}_ar_day_mean_min_precip_{min_precip}'
+            f'{exp_name}_ar_day_{mean_type}_min_precip_{min_precip}'
             f'.{start_year}-{end_year}.{var}.nc'
         )
         data_ctrl_ar_all_day_mean.to_netcdf(
             f'{base_path}{exp_name}/ar_all_day_mean/'
-            f'{exp_name}_ar_all_day_mean_min_precip_{min_precip}'
+            f'{exp_name}_ar_all_day_{mean_type}_min_precip_{min_precip}'
             f'.{start_year}-{end_year}.{var}.nc'
         )
         std_long.to_netcdf(
             f'{base_path}{exp_name}/ar_day_mean/'
-            f'{exp_name}_ar_day_std_min_precip_{min_precip}'
+            f'{exp_name}_ar_day_{std_type}_min_precip_{min_precip}'
             f'.{start_year}-{end_year}.{var}.nc'
         )
 
@@ -667,7 +705,7 @@ def _main():
     #         #variables=['prw', 'ivtx', 'ivty'],
     #         ar_analysis=True)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp_name", type=str, default='c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020')
+    parser.add_argument("--exp_name", type=str, default='c192L33_am4p0_amip_HIRESMIP_nudge_wind_p2K')
     args = parser.parse_args() 
     # store_monthly_mean_ar_masked_data(
     #         exp_name=f'{args.exp_name}', 
@@ -681,10 +719,11 @@ def _main():
         exp_name=f'{args.exp_name}',
         start_year=1980,
         end_year=2019,
-        variables=['ts', 'prw', 'pr', 'prsn', 'prli', 'ivtx', 'ivty', 'wap500',], #'mrro', 'mrsos',
-                        #'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'], 
+        variables=['ts', 'prw', 'pr', 'prsn', 'prli', 'ivtx', 'ivty', 'wap500', 'mrro', 'mrsos',
+                   'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'], 
         base_path='/archive/Marc.Prange/ar_masked_monthly_data/', 
-        min_precip=1
+        min_precip=1,
+        monthly_means=True
     )
     # base_path = '/archive/Marc.Prange/ar_masked_monthly_data/'
     # exp_name_ctrl = 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day'
