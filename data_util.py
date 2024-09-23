@@ -707,24 +707,24 @@ def _main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, default='c192L33_am4p0_amip_HIRESMIP_nudge_wind_p2K')
     args = parser.parse_args() 
-    # store_monthly_mean_ar_masked_data(
-    #         exp_name=f'{args.exp_name}', 
-    #         base_path='/archive/Ming.Zhao/awg/2023.04/', 
-    #         variables=['ts', 'prw', 'pr', 'prsn', 'ivtx', 'ivty', 'wap500',], #'mrro', 'mrsos',
-    #                     #'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'], 
-    #         start_year=1979, end_year=2020, 
-    #         gfdl_processor='gfdl.ncrc5-intel23-classic-prod-openmp',
-    #         min_precip=1)
-    store_ar_day_means(
-        exp_name=f'{args.exp_name}',
-        start_year=1980,
-        end_year=2019,
-        variables=['ts', 'prw', 'pr', 'prsn', 'prli', 'ivtx', 'ivty', 'wap500', 'mrro', 'mrsos',
-                   'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'], 
-        base_path='/archive/Marc.Prange/ar_masked_monthly_data/', 
-        min_precip=1,
-        monthly_means=True
-    )
+    store_monthly_mean_ar_masked_data(
+            exp_name=f'{args.exp_name}', 
+            base_path='/archive/Ming.Zhao/awg/2023.04/', 
+            variables=['ts', 'prw', 'pr', 'prsn', 'ivtx', 'ivty', 'wap500',], #'mrro', 'mrsos',
+                        #'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'], 
+            start_year=1979, end_year=2020, 
+            gfdl_processor='gfdl.ncrc5-intel23-classic-prod-openmp',
+            min_precip=1)
+    # store_ar_day_means(
+    #     exp_name=f'{args.exp_name}',
+    #     start_year=1980,
+    #     end_year=2019,
+    #     variables=['ts', 'prw', 'pr', 'prsn', 'prli', 'ivtx', 'ivty', 'wap500', 'mrro', 'mrsos',
+    #                'mrso', 'snw', 'evap_land', 'precip', 'rv_d_h2o', 'rv_o_h2o'], 
+    #     base_path='/archive/Marc.Prange/ar_masked_monthly_data/', 
+    #     min_precip=1,
+    #     monthly_means=True
+    # )
     # base_path = '/archive/Marc.Prange/ar_masked_monthly_data/'
     # exp_name_ctrl = 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day'
     # exp_name_p2K = 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1day_p2K'
