@@ -31,6 +31,13 @@ var_scaling = {
         'rv_d_h2o': 86400,
         'rv_d_h2o_diff_abs': 86400,
         'rv_d_h2o_diff_rel': 1, 
+        # HIGH/LOW FLOW 
+        'high_flow_count': 1,
+        'high_flow_count_diff_abs': 1,
+        'high_flow_count_diff_rel': 1, 
+        'low_flow_count': 1,
+        'low_flow_count_diff_abs': 1,
+        'low_flow_count_diff_rel': 1, 
         # EVAPORATION
         'evap_land': 86400,
         'evap_land_diff_abs': 86400,
@@ -55,6 +62,19 @@ var_scaling = {
         'snw': 1,
         'snw_diff_abs': 1,
         'snw_diff_rel': 1,
+        # WATER STORAGE
+        'LWS': 1,
+        'LWS_diff_abs': 1,
+        'LWS_diff_rel': 1,
+        'LWSv': 1,
+        'LWSv_diff_abs': 1,
+        'LWSv_diff_rel': 1,
+        'FWS': 1,
+        'FWS_diff_abs': 1,
+        'FWS_diff_rel': 1,
+        'FWSv': 1,
+        'FWSv_diff_abs': 1,
+        'FWSv_diff_rel': 1,
         # MELT
         'melt': 86400,
         'melt_diff_abs': 86400,
@@ -85,6 +105,13 @@ unit_str = {
         'rv_d_h2o': 'kg day$^{-1}$',
         'rv_d_h2o_diff_abs': 'kg day$^{-1}$ K$^{-1}$',
         'rv_d_h2o_diff_rel': '% K$^{-1}$',
+        # HIGH/LOW FLOW
+        'high_flow_count': 'days month$^{-1}$',
+        'high_flow_count_diff_abs': 'days month$^{-1}$',
+        'high_flow_count_diff_rel': '% month$^{-1}$',
+        'low_flow_count': 'days month$^{-1}$',
+        'low_flow_count_diff_abs': 'days month$^{-1}$',
+        'low_flow_count_diff_rel': '% month$^{-1}$',
         # EVAPORATION
         'evap_land': 'kg day$^{-1}$',
         'evap_land_diff_abs': 'kg day$^{-1}$ K$^{-1}$',
@@ -109,6 +136,19 @@ unit_str = {
         'snw': 'kg m$^{-2}$',
         'snw_diff_abs': 'kg m$^{-2}$',
         'snw_diff_rel': 'kg m$^{-2}$',
+        # WATER STORAGE
+        'LWS': 'kg m$^{-2}$',
+        'LWS_diff_abs': 'kg m$^{-2}$',
+        'LWS_diff_rel': 'kg m$^{-2}$',
+        'LWSv': 'kg m$^{-2}$',
+        'LWSv_diff_abs': 'kg m$^{-2}$',
+        'LWSv_diff_rel': 'kg m$^{-2}$',
+        'FWS': 'kg m$^{-2}$',
+        'FWS_diff_abs': 'kg m$^{-2}$',
+        'FWS_diff_rel': 'kg m$^{-2}$',
+        'FWSv': 'kg m$^{-2}$',
+        'FWSv_diff_abs': 'kg m$^{-2}$',
+        'FWSv_diff_rel': 'kg m$^{-2}$',
         # MELT
         'melt': 'kg day$^{-1}$',
         'melt_diff_abs': 'kg day$^{-1}$',
@@ -218,7 +258,7 @@ def plot_labelled_basin_map(
     basin_mean_lon_lat = {
         basin: (lon.where(rv_basin_cubic == basin).mean(), lat.where(rv_basin_cubic == basin).mean()) 
         for basin in major_basins}
-    [ax.annotate(f'{basin}', xy=(lon, lat), weight='bold') 
+    [ax.annotate(f'{basin}', xy=(lon, lat), weight='bold')
      for basin, (lon, lat) in basin_mean_lon_lat.items()
      if (lat < 70) & (lat > 20) * (lon > -140) & (lon < -60)]
     ax.set_extent(
@@ -266,7 +306,6 @@ def plot_ar_count_seasonal_cycle_for_region(
         f'{start_year}_{end_year}_{var_str}.png',
         dpi=300, bbox_inches='tight')
     
-
 def plot_seasonal_cycle_for_region(
         exp_names, exp_name_labels, base_path, variables, start_year, end_year,
         region_mask, region_mask_cubic, region_label, 
@@ -316,12 +355,16 @@ def plot_seasonal_cycle_for_region(
                     land_area_cubic = land_area_cubic.where(region_mask_cubic)
                     monthly_mean_region = (monthly_mean.where(
                             region_mask_cubic)*land_area_cubic).sum(['grid_xt', 'grid_yt'])
+                elif var in ['high_flow_count', 'low_flow_count'] and mean_type == 'all_day':
+                    monthly_mean_region = monthly_mean.where(
+                        region_mask).mean(['lat', 'lon'])
                 else:
                     if var == 'rv_d_h2o':
                         land_area = land_area.where(region_mask)
                         monthly_mean_region = (monthly_mean.where(
                             region_mask)*land_area).sum(['lon', 'lat'])
-                    elif var in ['evap_land', 'melt', 'melts', 'transp']:
+                    elif var in ['evap_land', 'melt', 'melts', 'transp',
+                                 'snw', 'LWS', 'FWS', 'LWSv', 'FWSv']:
                         land_area = land_area.where(region_mask)
                         monthly_mean_region = (monthly_mean * land_area).where(
                             region_mask).sum(['lon', 'lat']) 
@@ -345,15 +388,117 @@ def plot_seasonal_cycle_for_region(
                     elif var in ['ts']:
                         monthly_mean_region = (monthly_mean.where(
                             region_mask)).mean(['lon', 'lat']) - 273.15
-                    elif var in ['snw']:
-                        monthly_mean_region = (monthly_mean.where(
-                            region_mask)).mean(['lon', 'lat'])
                 ax.plot(
                     monthly_mean_region.month, 
                     monthly_mean_region[f'{var}']*var_scaling[var], 
                     label=label)
 
-            ax.set(xlabel='month', ylabel=f'{var} / {unit_str[var]}')
+            ax.set(xlabel='month', ylabel=f'{var} /\n{unit_str[var]}')
+            axs.append(ax)
+    axs[0].legend()
+    [axs[i].set_title(mean_type) 
+     for i, mean_type in enumerate(mean_types)]
+    fig.suptitle(f'{region_label}, {start_year}-{end_year}')
+    var_str = "_".join("%s" % "".join(var) 
+                       for var in variables)
+    exp_str = "_".join("%s" % "".join(exp_label) 
+                       for exp_label in exp_name_labels)
+    plot_path = f'plots/seasonal_cycle_for_regions/{region_label.replace(" ", "_")}'
+    Path(plot_path).mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        f'{plot_path}/'
+        f'seasonal_cycle_{region_label.replace(" ", "_")}_{exp_str}_'
+        f'{start_year}_{end_year}_{var_str}.png',
+        dpi=300, bbox_inches='tight')
+
+def plot_therm_dyn_change_seasonal_cycle_for_region(
+        exp_names, exp_name_labels, base_path, variables, start_year, end_year,
+        region_mask, region_mask_cubic, region_label, 
+        mean_types=['ar_day', 'ar_all_day'], min_precip=1, 
+        land_area=None, land_area_cubic=None, cell_area=None, mrso_sat=None):
+    """_summary_
+
+    Args:
+        exp_name (_type_): _description_
+        base_path (_type_): _description_
+        variable (_type_): _description_
+    """
+
+    fig = plt.figure(figsize=(4*len(mean_types), 2*len(variables)))
+    axs = []
+    nsubplot = 0
+    for var in variables:
+        for mean_type in mean_types:
+            nsubplot += 1
+            ax = fig.add_subplot(len(variables), len(mean_types), nsubplot)
+            for exp_name, label in zip(exp_names, exp_name_labels):
+                if 'ar' in mean_type:
+                    mean_path = f'ar_masked_monthly_data/{exp_name}/{mean_type}_mean/'
+                    min_precip_str = f'_min_precip_{min_precip}'
+                else:
+                    mean_path = f'all_day_means/{exp_name}/'
+                    min_precip_str = ''
+                print(
+                    f"Plotting {mean_type} seasonal cycle of "
+                    f"{var} for {region_label} \n for sim {label}")
+                if var == 'rv_d_h2o' and mean_type == 'all_day':
+                    monthly_mean = xr.open_mfdataset(
+                    f'{base_path}{mean_path}'
+                    f'{exp_name}_{mean_type}_monthly_mean'
+                    f'{min_precip_str}.{start_year}-{end_year}.{var}.tile*.nc',
+                    concat_dim='grid_yt', combine='nested')
+                    monthly_mean['grid_yt'] = np.arange(1, len(monthly_mean.grid_yt)+1)
+                else:
+                    monthly_mean = xr.open_dataset(
+                        f'{base_path}{mean_path}'
+                        f'{exp_name}_{mean_type}_monthly_mean'
+                        f'{min_precip_str}.{start_year}-{end_year}.{var}.nc'
+                    )
+                if 'ar' not in mean_type and var != 'rv_d_h2o':
+                    monthly_mean = du.lon_360_to_180(monthly_mean)
+                if var == 'rv_d_h2o' and mean_type == 'all_day':
+                    land_area_cubic = land_area_cubic.where(region_mask_cubic)
+                    monthly_mean_region = (monthly_mean.where(
+                            region_mask_cubic)*land_area_cubic).sum(['grid_xt', 'grid_yt'])
+                elif var in ['high_flow_count', 'low_flow_count'] and mean_type == 'all_day':
+                    monthly_mean_region = monthly_mean.where(
+                        region_mask).mean(['lat', 'lon'])
+                else:
+                    if var == 'rv_d_h2o':
+                        land_area = land_area.where(region_mask)
+                        monthly_mean_region = (monthly_mean.where(
+                            region_mask)*land_area).sum(['lon', 'lat'])
+                    elif var in ['evap_land', 'melt', 'melts', 'transp',
+                                 'snw', 'LWS', 'FWS', 'LWSv', 'FWSv']:
+                        land_area = land_area.where(region_mask)
+                        monthly_mean_region = (monthly_mean * land_area).where(
+                            region_mask).sum(['lon', 'lat']) 
+                    elif var in ['pr', 'prli', 'prsn']:
+                        cell_area = cell_area.where(region_mask)
+                        monthly_mean_region = (monthly_mean * cell_area).where(
+                            region_mask).sum(['lon', 'lat'])
+                    elif var in ['mrso']:
+                        sec_in_month = {month+1: days*86400
+                             for month, days in 
+                             enumerate([31, 28.25, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])}
+                        sec_in_month = xr.DataArray(
+                            data=list(sec_in_month.values()), 
+                            coords={'month': list(sec_in_month.keys())}, 
+                            dims='month')
+                        monthly_mean_region = monthly_mean_region.differentiate('month') / \
+                            sec_in_month
+                        monthly_mean_region = (monthly_mean.where(
+                            region_mask)*land_area).sum(['lon', 'lat']) / \
+                            (land_area).sum(['lon', 'lat'])
+                    elif var in ['ts']:
+                        monthly_mean_region = (monthly_mean.where(
+                            region_mask)).mean(['lon', 'lat']) - 273.15
+                ax.plot(
+                    monthly_mean_region.month, 
+                    monthly_mean_region[f'{var}']*var_scaling[var], 
+                    label=label)
+
+            ax.set(xlabel='month', ylabel=f'{var} /\n{unit_str[var]}')
             axs.append(ax)
     axs[0].legend()
     [axs[i].set_title(mean_type) 
@@ -378,6 +523,13 @@ def plot_water_balance_seasonal_cycle_for_region(
         land_area=None, land_area_cubic=None, cell_area=None):
     fig = plt.figure(figsize=(4, 2))
     ax = fig.add_subplot(111)
+    sec_in_month = {month+1: days*86400
+                             for month, days in 
+                             enumerate([31, 28.25, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])}
+    sec_in_month = xr.DataArray(
+        data=list(sec_in_month.values()), 
+        coords={'month': list(sec_in_month.keys())}, 
+        dims='month')
     for exp_name, label in zip(exp_names, exp_name_labels):
         monthly_means = {var: (du.lon_360_to_180(xr.open_dataset(
                                 f'{base_path}all_day_means/{exp_name}/'
@@ -393,15 +545,9 @@ def plot_water_balance_seasonal_cycle_for_region(
                         }
         if 'rv_d_h2o' in monthly_means.keys():
             monthly_means['rv_d_h2o']['grid_yt'] = np.arange(1, len(monthly_means['rv_d_h2o'].grid_yt)+1)
-        if 'mrso' in monthly_means.keys():
-            sec_in_month = {month+1: days*86400
-                             for month, days in 
-                             enumerate([31, 28.25, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])}
-            sec_in_month = xr.DataArray(
-                data=list(sec_in_month.values()), 
-                coords={'month': list(sec_in_month.keys())}, 
-                dims='month')
-            monthly_means['mrso'] = monthly_means['mrso'].differentiate('month') / sec_in_month
+        for var in monthly_means.keys():
+            if var in ['mrso', 'snw', 'LWS', 'FWS', 'LWSv', 'FWSv']:
+                monthly_means[var] = monthly_means[var].differentiate('month') / sec_in_month
         # Apply region mask
         monthly_means = {var: (monthly_mean.where(region_mask) 
                                    if var != 'rv_d_h2o'
@@ -413,29 +559,29 @@ def plot_water_balance_seasonal_cycle_for_region(
         # Calculate basin integral
         monthly_means = {var: (monthly_mean * land_area).sum(['lon', 'lat'])
                                for var, monthly_mean in monthly_means.items()
-                        if var not in ['rv_d_h2o', 'pr', 'prsn']}
+                        if var not in ['rv_d_h2o']}
         if 'rv_d_h2o' in monthly_means.keys():
             monthly_means['rv_d_h2o'] = (
                 monthly_means['rv_d_h2o'] * land_area_cubic).sum(['grid_xt', 'grid_yt'])
-        for var in ['pr', 'prsn']:
-            if var in monthly_means.keys():
-                monthly_means[var] = (monthly_means[var] * cell_area).sum(['lat', 'lon'])
         # Seperate positive and negative monthly means
         pos_monthly_means = [monthly_mean for var, monthly_mean in monthly_means.items() 
                              if var in pos_variables]
         neg_monthly_means = [monthly_mean for var, monthly_mean in monthly_means.items() 
                              if var in neg_variables]
-        balance = sum(pos_monthly_means) - sum(neg_monthly_means)
-        ax.plot(np.arange(1, 13), balance*86400, label=label)
-    ax.set(xlabel='month', ylabel='water balance / kg day$^{-1}$')
+        balance = (sum(pos_monthly_means) - sum(neg_monthly_means))*sec_in_month
+        annual_balance = sum(balance).values
+        ax.plot(np.arange(1, 13), balance, label=label)
+    ax.set(xlabel='month', ylabel='water balance / kg month$^{-1}$')
     fig.legend(prop={'size': 4})
     pos_var_str = "+".join("%s" % "".join(var) 
                        for var in pos_variables)
     neg_var_str = "+".join("%s" % "".join(var) 
-                       for var in neg_variables) 
+                       for var in neg_variables)
     ax.set_title(
         f"{region_label} water balance"
-        f"\n{pos_var_str}-({neg_var_str})", 
+        f"\n{pos_var_str}-({neg_var_str})"
+        f"\nAnnual balance: {annual_balance:.2e} "
+         "kg year$^{-1}$", 
         fontdict={'fontsize': 8})
     plot_path = f'plots/seasonal_cycle_for_regions/{region_label.replace(" ", "_")}'
     Path(plot_path).mkdir(parents=True, exist_ok=True)
@@ -449,18 +595,18 @@ def plot_water_balance_seasonal_cycle_for_region(
 
 def _main():
     exp_names = ['c192L33_am4p0_amip_HIRESMIP_HX', 
-                 'c192L33_am4p0_amip_HIRESMIP_HX_p2K',
-                 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020',
-                 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_p2K',
+                #  'c192L33_am4p0_amip_HIRESMIP_HX_p2K',
+                #  'c192L33_am4p0_amip_HIRESMIP_nudge_wind_1951_2020',
+                #  'c192L33_am4p0_amip_HIRESMIP_nudge_wind_p2K',
                  ]
-    exp_name_labels = ['HX_ctrl', 'HX_p2K', 'nudge6hrd_ctrl', 'nudged6hr_p2K']
+    exp_name_labels = ['HX_ctrl', ]#'HX_p2K', 'nudged6hr_ctrl', 'nudged6hr_p2K']
     base_path = '/archive/Marc.Prange/'
-    variables = ['ts', 'pr', 'prsn', 'snw', 'rv_d_h2o', 'evap_land', 'mrso']
+    variables = ['rv_d_h2o', 'pr', 'evap_land', 'LWS', 'FWS', 'LWSv', 'FWSv']
     start_year = 1980
-    end_year = 2019
-    region_label = 'colorado river basin'
-    basin_id = 30
-    mean_types = ['all_day', 'ar_all_day']
+    end_year = 2019 
+    region_label = 'sacramento river basin'
+    basin_id = 104
+    mean_types = ['all_day']
     min_precip = 1
     static_base_path = '/archive/Ming.Zhao/awg/2022.03/c192L33_am4p0_amip_HIRESMIP_HX/'\
                        'gfdl.ncrc4-intel-prod-openmp/pp'
@@ -493,11 +639,11 @@ def _main():
     cell_area = land_static.cell_area
     land_area_cubic = rv_static_cubic.land_area
     mrso_sat = land_static.mrsofc
-    plot_seasonal_cycle_for_region(
-        exp_names, exp_name_labels, base_path, variables, start_year, end_year,
-        region_mask, region_mask_cubic, region_label, mean_types, min_precip,
-        land_area, land_area_cubic, cell_area, mrso_sat
-        )
+    # plot_seasonal_cycle_for_region(
+    #     exp_names, exp_name_labels, base_path, variables, start_year, end_year,
+    #     region_mask, region_mask_cubic, region_label, mean_types, min_precip,
+    #     land_area, land_area_cubic, cell_area, mrso_sat
+    #     )
     # plot_ar_count_seasonal_cycle_for_region(
     #     exp_names, exp_name_labels, base_path, start_year, end_year,
     #     region_mask, region_label, min_precip=1)
@@ -510,8 +656,8 @@ def _main():
         
     plot_water_balance_seasonal_cycle_for_region(
         exp_names, exp_name_labels, base_path, 
-        ['pr', 'melt'],
-        ['prsn', 'evap_land', 'transp', 'rv_d_h2o', 'mrso'], 
+        ['pr'], 
+        ['evap_land', 'rv_d_h2o', 'FWS', 'LWS', 'FWSv', 'LWSv'], 
         start_year, end_year, region_mask, region_mask_cubic, region_label, 
         land_area, land_area_cubic, cell_area)
 
