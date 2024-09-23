@@ -404,7 +404,7 @@ def plot_clim_mean_sim_comp(
     dist_data = du.lon_360_to_180(
             xr.open_mfdataset(dist_paths, compat='override').sel(
         time=slice(f'{start_year}', f'{end_year}')))
-    dist_data = dist_data.sel(time=ref_data.time.dt.month.isin(months))
+    dist_data = dist_data.sel(time=dist_data.time.dt.month.isin(months))
     dist_data_mean = dist_data.mean('time')
     
     plot_configs = {
