@@ -386,6 +386,9 @@ def plot_AR_stat_diff_map(
     if region == 'NA':
         ref_data = du.sel_na(ref_data)
         dist_data = du.sel_na(dist_data)
+    elif region == 'conus':
+        ref_data = du.sel_conus_land(ref_data)
+        dist_data = du.sel_conus_land(dist_data)
     if abs_rel_diff == 'abs':
         norm = dT
     nvars = len(plot_vars)
@@ -612,9 +615,9 @@ def plot_ar_warming_response_maps(
 
     # Plotting setups
     plot_configs = {
-        'variables': [['pr', 'prli', 'prsn'], ],#['mrro', 'rv_o_h2o', 'evap_land']],
-        'weighting': ['ar_day', 'all_day'],
-        'region': ['global', 'NA'],
+        'variables': [['pr'], ],#['mrro', 'rv_o_h2o', 'evap_land']],
+        'weighting': ['all_day'],
+        'region': ['conus'],
         'abs_rel_diff': ['abs', 'rel'],
     }
 
@@ -635,11 +638,17 @@ def plot_ar_warming_response_maps(
                     if weighting == 'ar_day':
                         plot_ctrl_data = data_ctrl_ar_day_mean
                         plot_warming_data = data_warming_ar_day_mean
-                        ste = ste_ctrl_long
+                        if significance > 0:    
+                            ste = ste_ctrl_long
+                        else:
+                            ste = False 
                     if weighting == 'all_day':
                         plot_ctrl_data = data_ctrl_ar_all_day_mean
                         plot_warming_data = data_warming_ar_all_day_mean
-                        ste = ste_ctrl_long_all_day
+                        if significance > 0:
+                            ste = ste_ctrl_long_all_day
+                        else:
+                            ste = False
                     fig, axs = plot_AR_stat_diff_map(
                         ref_data=plot_ctrl_data, 
                         dist_data=plot_warming_data, 
@@ -664,10 +673,10 @@ def is_winter(month):
 
 def _main():
     base_path = '/archive/Marc.Prange/ar_masked_monthly_data/'
-    exp_name_ctrl = 'c192L33_am4p0_amip_HIRESMIP_HX'
-    exp_name_dist = 'c192L33_am4p0_amip_HIRESMIP_HX_p2K'
-    ctrl_label = 'HX_ctrl'
-    dist_label = 'HX_p2K'
+    exp_name_ctrl = 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min'
+    exp_name_dist = 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min_p2K'
+    ctrl_label = 'nudge_30min_ctrl'
+    dist_label = 'nudge_30min_p2K'
     start_year = 1980
     end_year = 2019
 
@@ -675,10 +684,11 @@ def _main():
         exp_name_ctrl, exp_name_dist, 
         ctrl_label, dist_label, start_year, end_year,
         base_path='/archive/Marc.Prange/ar_masked_monthly_data/', 
-        min_precip=1, min_ARs=30, significance=1,
+        min_precip=1, min_ARs=30, significance=0,
         # exp-names for double differences (to be subtracted)
         exp_name_ctrl_dist=None, exp_name_warming_dist=None,
-        plot_ar_freq=True,) 
+        plot_ar_freq=True,
+        ) 
     
     
     
