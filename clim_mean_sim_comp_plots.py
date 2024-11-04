@@ -15,6 +15,7 @@ from scipy.interpolate import interp1d
 import matplotlib.gridspec as gridspec
 import seaborn as sns
 from sklearn.metrics import root_mean_squared_error
+from scipy import stats
 
 import data_util as du
 
@@ -234,6 +235,10 @@ def plot_clim_mean_precip_diff_maps(
         mean_levels = np.arange(0, 16, 1)
         abs_diff_levels = np.arange(-2, 2.1, 0.1)
         rel_diff_levels = np.arange(-50, 55, 5)
+    elif var in ['ar_pr', 'ar_precip']:
+        mean_levels = np.arange(0, 4.4, 0.4)
+        abs_diff_levels = np.arange(-1, 1.1, 0.1)
+        rel_diff_levels = np.arange(-75, 80, 5)
     else:
         mean_levels = np.arange(0, 10.5, 0.5)
         abs_diff_levels = np.arange(-1.5, 1.6, 0.1)
@@ -451,7 +456,7 @@ def plot_clim_mean_diff_maps(
         dist_data['windspeed_250'] = np.sqrt(dist_data.u_250**2 + dist_data.v_250**2)
         fig, axs = plot_clim_mean_wind_diff_maps(
             ref_data, dist_data, ref_data_label, dist_data_label, region, level='250')
-    if variable in ['precip', 'pr_intensity']:
+    if variable in ['precip', 'pr_intensity', 'ar_pr', 'ar_precip']:
         fig, axs = plot_clim_mean_precip_diff_maps(
             ref_data, dist_data, ref_data_label, dist_data_label, region, variable)
     if variable in ['pr_frequency']:
@@ -491,7 +496,8 @@ def plot_clim_mean_sim_comp(
     unique_vars = np.unique(np.concatenate([var for var in variables.values()]))
     ts_all_path = {var: (exp_basepath_map[exp_name_ctrl]
                             if (var not in ['u_700', 'v_700', 'u_250', 'v_250', 
-                                            'pr_intensity', 'prsn_intensity', 'pr_frequency'])
+                                            'pr_intensity', 'prsn_intensity', 'pr_frequency', 
+                                            'ar_pr', 'ar_precip'])
                             and (exp_name_ctrl != 'c192_obs')
                             else '/archive/Marc.Prange/ts_all_missing_vars/')
                     for var in np.concatenate([var for var in variables.values()])              
@@ -505,7 +511,8 @@ def plot_clim_mean_sim_comp(
                      for v in variables[ref_sub]]
     ts_all_path = {var: (exp_basepath_map[exp_name_dist]
                             if var not in ['u_700', 'v_700', 'u_250', 'v_250', 
-                                           'pr_intensity', 'prsn_intensity', 'pr_frequency']
+                                           'pr_intensity', 'prsn_intensity', 'pr_frequency',
+                                           'ar_pr', 'ar_precip']
                             and (exp_name_dist != 'c192_obs')
                             else '/archive/Marc.Prange/ts_all_missing_vars/')
                     for var in np.concatenate([var for var in variables.values()])              
@@ -518,7 +525,9 @@ def plot_clim_mean_sim_comp(
             xr.open_mfdataset(ref_paths, compat='override').sel(
         time=slice(f'{start_year}', f'{end_year}')))
     ref_data = ref_data.sel(time=ref_data.time.dt.month.isin(months))
-    
+    if 'ar_precip' in unique_vars:
+        ref_data = ref_data.rename({'ar_precip': 'ar_pr'})
+        unique_vars = np.delete(unique_vars, np.where(unique_vars == 'ar_precip'))
     ref_data_mean = ref_data.mean('time')
     print(f'Loading clim. mean data for simulation {dist_label}', flush=True)
     dist_data = du.lon_360_to_180(
@@ -689,10 +698,26 @@ def plot_daily_cdf_diff_to_obs(
         f'{variable}_{exp_label}_{s.join(obs_names)}_{start_year}_{end_year}_{time_str}_conus.png',
         dpi=300, bbox_inches='tight'
     )
+def calculate_percentiles_with_uncertainty(ds, percentiles, n_resamples=1000, confidence_level=0.95):
+    
+    def calc_percentiles(data, axis=0):
+        return np.percentile(data, percentiles, axis=axis)
+    
+    bootstrap_results = stats.bootstrap(
+        (ds.values,),
+        calc_percentiles,
+        n_resamples=n_resamples,
+        confidence_level=confidence_level, 
+        vectorized=True,
+        method='basic'
+    )
+    
+    return bootstrap_results.bootstrap_distribution, bootstrap_results.confidence_interval
 
 def plot_daily_cdf_change_with_warming(
         exp_name_ref, exp_label_ref, exp_name_dist, exp_label_dist, 
-        start_year, end_year, variables, min_vals, months, time_str):
+        start_year, end_year, variables, min_vals, months, time_str, bootstrap=True,
+        bootstrap_n_resamples=100, bootstrap_confidence_level=0.95):
     dT = du.get_global_mean_dT(exp_name_ref, exp_name_dist, start_year, end_year)
     pr_x = np.logspace(-3, np.log10(90), 200, endpoint=True)
     pctls = (100 - pr_x)
@@ -709,8 +734,6 @@ def plot_daily_cdf_change_with_warming(
         exp_data_ref = du.sel_conus_land(exp_data_ref)
         exp_data_ref = exp_data_ref.stack(case=('lat', 'lon', 'time'))
         exp_data_ref = exp_data_ref.where(exp_data_ref >= min_val).dropna('case')
-        exp_ref_pctl_values = np.percentile(exp_data_ref.values, pctls)
-
         exp_data_dist = xr.open_mfdataset(
                         f'/archive/Marc.Prange/na_data/{exp_name_dist}/{exp_name_dist}_na_*.nc'
                     )[variable].sel(time=slice(str(start_year), str(end_year)))
@@ -718,17 +741,46 @@ def plot_daily_cdf_change_with_warming(
         exp_data_dist = du.sel_conus_land(exp_data_dist)
         exp_data_dist = exp_data_dist.stack(case=('lat', 'lon', 'time'))
         exp_data_dist = exp_data_dist.where(exp_data_dist >= min_val).dropna('case')
-        exp_dist_pctl_values = np.percentile(exp_data_dist.values, pctls)
+        if bootstrap:
+            bootstrap_distr_ref, conf_int_ref = \
+                calculate_percentiles_with_uncertainty(
+                    exp_data_ref, pctls, bootstrap_n_resamples, bootstrap_confidence_level)
+            bootstrap_distr_dist, conf_int_dist = \
+                calculate_percentiles_with_uncertainty(
+                    exp_data_dist, pctls, bootstrap_n_resamples, bootstrap_confidence_level)
+            exp_ref_pctl_values = np.mean(bootstrap_distr_ref, axis=1)
+            exp_dist_pctl_values = np.mean(bootstrap_distr_dist, axis=1)
+            diff_pctl_values = exp_dist_pctl_values - exp_ref_pctl_values
+            diff_conf_int_lower = diff_pctl_values - \
+                np.sqrt((exp_ref_pctl_values-conf_int_ref[0])**2 + 
+                        (exp_dist_pctl_values-conf_int_dist[0])**2)
+            diff_conf_int_upper = diff_pctl_values + \
+                np.sqrt((exp_ref_pctl_values-conf_int_ref[1])**2 + 
+                                           (exp_dist_pctl_values-conf_int_dist[1])**2)
+            # exp_ref_var_values = np.var(bootstrap_distr_ref, axis=1) # variance of percentiles
+            # exp_dist_var_values = np.var(bootstrap_distr_dist, axis=1)
+            # diff_pctl_std_error = np.sqrt(exp_ref_var_values + 
+            #                               exp_dist_var_values) / np.sqrt(bootstrap_n_resamples) # Std of difference of percentiles
+        else:
+            exp_ref_pctl_values = np.percentile(exp_data_ref.values, pctls)
+            exp_dist_pctl_values = np.percentile(exp_data_dist.values, pctls)
+            diff_pctl_values = exp_dist_pctl_values - exp_ref_pctl_values
         ax2.plot(
-            exp_ref_pctl_values*86400, (exp_dist_pctl_values-exp_ref_pctl_values)/exp_ref_pctl_values/dT*100, 
+            exp_ref_pctl_values*86400, (diff_pctl_values)/exp_ref_pctl_values/dT*100, 
             label=f'{variable}', lw=1)
+        if bootstrap:
+            ax2.fill_between(
+                exp_ref_pctl_values*86400, 
+                diff_conf_int_lower/exp_ref_pctl_values/dT*100, 
+                diff_conf_int_upper/exp_ref_pctl_values/dT*100, 
+                color=ax2.get_lines()[-1].get_color(), alpha=0.2)
     ax2.hlines(0, 1e-1, 250, color='gray', ls='--')
     ax2.legend()
     ax2.set(
         xlabel=f'{variable}'+' / mm day$^{-1}$', 
         ylabel='$\Delta_{rel}$'+f'{exp_label_dist}-{exp_label_ref} /'+' % K$^{-1}$', 
         xlim=[1e-1, 250], 
-        ylim=[-2, 10]
+        ylim=[-2, 8]
     )
     ax2.set_xscale('log')
     # plt.tight_layout()
@@ -741,63 +793,26 @@ def plot_daily_cdf_change_with_warming(
 
 
 def _main():
-    for exp_name_dist, dist_label in zip(['c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min'],
-                                          ['nudge_30min_ctrl']):
-        for ctrl_label in ['imerg', 'stageiv', 'mswep']:
+    for exp_name_dist, dist_label in zip(['c192L33_am4p0_amip_HIRESMIP_HX'],
+                                          ['HX_ctrl']):
+        for ctrl_label in ['imerg']:
             exp_name_ctrl = 'c192_obs'
-            # exp_name_dist = 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min'
-            # ctrl_label = 'stageiv'
-            # dist_label = 'nudge_30min_ctrl'
+            # exp_name_dist = 'c192L33_am4p0_amip_HIRESMIP_HX'
+            # dist_label = 'HX_ctrl'
             start_year = 2001
             end_year = 2020
             variables = {
-                'atmos_cmip': ['ar_precip', 'ar_pr_intensity', 'ar_pr_frequency'], 
+                'atmos_cmip': ['ar_pr'], 
                 'atmos': [], 
                 'land': [], 
                 'river': [], 
-                ctrl_label: ['ar_precip', 'ar_pr_intensity', 'ar_pr_frequency']}
+                ctrl_label: ['ar_precip']}
             ref_sub = ctrl_label
             for months, time_str in zip([[11, 12, 1, 2], np.arange(1, 13)], ['winter', 'all_months']):
                 plot_clim_mean_sim_comp(
                     exp_name_ctrl, exp_name_dist, 
                     ctrl_label, dist_label, ref_sub, start_year, end_year,
-                    variables, months, time_str=time_str, regions=['conus_land'])
-    exp_names = [
-        # 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min',
-        # 'c192L33_am4p0_amip_HIRESMIP_HX_p2K',
-        'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min',
-        # 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min_p2K', 
-        {'c192_obs': ['mswep', 'imerg', 'stageiv']},
-    ]
-    exp_labels = [
-        # 'HX_ctrl',
-        # 'HX_p2K',
-        'nudge_30min_ctrl',
-        # 'nudge_30min_p2K',
-        'c192_obs'
-    ]
-
-    variables = ['ar_pr', 'pr']
-    start_year = 2001
-    end_year = 2020
-    months = np.arange(1, 13)
-    time_str = 'all_months'
-    plot_daily_cdf_for_region(
-        exp_names, exp_labels, start_year, end_year, variables, months, time_str, min_vals=[0, 0])
-    # plot_daily_cdf_diff_to_obs(
-    #     exp_name='c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min', 
-    #     exp_label='nudge_30min_ctrl',
-    #     obs_names=['mswep', 'stageiv', 'imerg'],
-    #     start_year=start_year, end_year=end_year, 
-    #     variable=variables[0], min_val=1/86400, months=months, time_str=time_str)
-    
-    # plot_daily_cdf_change_with_warming(
-    #     exp_name_ref='c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min', 
-    #     exp_label_ref='nudge_30min_ctrl',
-    #     exp_name_dist='c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min_p2K', 
-    #     exp_label_dist='nudge_30min_p2K',
-    #     start_year=1951, end_year=2020, 
-    #     variables=['ar_pr', 'pr'], min_vals=[1/86400, 1/86400], months=months, time_str=time_str)
+                    variables, months, time_str=time_str, regions=['NA', 'conus_land']) 
 
 if __name__ == '__main__':
     _main()
