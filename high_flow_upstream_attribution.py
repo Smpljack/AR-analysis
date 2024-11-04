@@ -108,17 +108,23 @@ def perform_lagged_correlation(
         if precip_window.sum() > streamflow_window.sum():
             corr_matrix_precip = np.corrcoef(precip_window.values, streamflow_window.values)
             corr_precip = corr_matrix_precip[0, 1]
-        if np.abs(melt_window.sum()) > streamflow_window.sum():
-            corr_matrix_melt = np.corrcoef(melt_window.values, streamflow_window.values)
-            corr_melt = corr_matrix_melt[0, 1]
-
-        if not np.isnan(corr_precip) and not np.isnan(corr_melt):
-            if corr_melt < best_corr_melt:
-                best_corr_melt = corr_melt
-                best_lag_melt = lag
             if corr_precip > best_corr_precip:
                 best_corr_precip = corr_precip
                 best_lag_precip = lag
+        else:
+            print(f"Not enough precipitation to cause high flow on day {high_flow_time}")
+            corr_precip = np.nan
+        if np.abs(melt_window.sum()) > streamflow_window.sum():
+            corr_matrix_melt = np.corrcoef(melt_window.values, streamflow_window.values)
+            corr_melt = corr_matrix_melt[0, 1]
+            if corr_melt < best_corr_melt:
+                best_corr_melt = corr_melt
+                best_lag_melt = lag
+        else:
+            print(f"Not enough melt to cause high flow on day {high_flow_time}")
+            corr_melt = np.nan
+        if not np.isnan(corr_melt) and not np.isnan(corr_precip):
+            continue
         if plot_lagged_timeseries:
             plot_precip_streamflow_window(
                 high_flow_time, precip_window, melt_window, streamflow_window, 
@@ -223,7 +229,7 @@ import xarray as xr
 from datetime import datetime
 
 def plot_streamflow_timeseries(streamflow_data: xr.DataArray, precip_data: xr.DataArray, 
-                               high_flow_mask: xr.DataArray, 
+                               high_flow_mask: xr.DataArray, high_flow_time: np.datetime64, 
                                location: tuple, save_path: str = None):
     """
     Plots the time series of daily streamflow for a given location, marking the identified high flow events.
@@ -252,6 +258,7 @@ def plot_streamflow_timeseries(streamflow_data: xr.DataArray, precip_data: xr.Da
     streamflow_values = streamflow_point.values
     precip_values = precip_point.values
     high_flow_events = streamflow_point['time'].values[high_flow_point.values]
+    high_flow_value = streamflow_point.sel(time=high_flow_time).values
 
     # Create the plot
     plt.figure(figsize=(14, 7))
@@ -267,7 +274,8 @@ def plot_streamflow_timeseries(streamflow_data: xr.DataArray, precip_data: xr.Da
     ax2.tick_params(axis='y', labelcolor='green')
     # Mark high flow events
     ax1.scatter(high_flow_events, streamflow_values[high_flow_point.values], 
-                color='red', marker='o', label='High Flow Events')
+                color='gray', marker='o', label='High Flow Events')
+    ax1.scatter(high_flow_time, high_flow_value, color='red', marker='o', label='High Flow Event')
 
     ax1.set_title(f'Daily Streamflow at Location (Lat: {lat}, Lon: {lon})')
     ax1.set_xlabel('Time')
@@ -336,13 +344,13 @@ def main():
     low_pr_value = 0
     min_pr_var = precip_var
     ar_masked_vars = [precip_var]
-    do_test_plots = True
+    do_test_plots = False
 
     # Load daily data
     daily_data_reg = lon_180_to_360(sel_conus_land(load_model_data(
         base_path, year, variables, exp_name, ar_condition, min_ar_pr_threshold, 
         low_pr_value, min_pr_var, ar_masked_vars, gfdl_processor, lon_180=True,
-    )))
+    ))).load()
     
     # Load flow threshold
     flow_threshold = xr.open_dataarray(
@@ -353,26 +361,26 @@ def main():
     # Load clim mean flow velocities
     monthly_mean_flow_velocity_ds = xr.open_mfdataset(
         f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/river/av/monthly_42yr/river.1979-2020.*.nc')['rv_veloc'].groupby('time.month').mean('time')
+        f'pp/river/av/monthly_42yr/river.1979-2020.*.nc')['rv_veloc'].groupby('time.month').mean('time').load()
     monthly_mean_streamflow_ds = xr.open_mfdataset(
         f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/river/av/monthly_42yr/river.1979-2020.*.nc')['rv_o_h2o'].groupby('time.month').mean('time')
+        f'pp/river/av/monthly_42yr/river.1979-2020.*.nc')['rv_o_h2o'].groupby('time.month').mean('time').load()
     # Load static datasets
     river_static_t3 = xr.open_dataset(
         f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/river_cubic/river_cubic.static.tile3.nc') 
+        f'pp/river_cubic/river_cubic.static.tile3.nc').load()
     river_static_t5 = xr.open_dataset(
         f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/river_cubic/river_cubic.static.tile5.nc')
+        f'pp/river_cubic/river_cubic.static.tile5.nc').load()
     land_static_t5 = xr.open_dataset(
         f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/land_cubic/land_cubic.static.tile5.nc')
+        f'pp/land_cubic/land_cubic.static.tile5.nc').load()
     land_static_t3 = xr.open_dataset(
         f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/land_cubic/land_cubic.static.tile3.nc')
+        f'pp/land_cubic/land_cubic.static.tile3.nc').load()
     land_static = xr.open_dataset(
         f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/land/land.static.nc')
+        f'pp/land/land.static.nc').load()
     river_static_cubic = xr.concat([river_static_t3, river_static_t5], dim='grid_yt').transpose('grid_xt', 'grid_yt')
     river_static_cubic['grid_yt'] = np.arange(1, river_static_cubic.grid_yt.size+1)
     land_static_cubic = xr.concat([land_static_t3, land_static_t5], dim='grid_yt').transpose('grid_xt', 'grid_yt')
@@ -383,14 +391,14 @@ def main():
     land_area = land_static.land_area
 
     # Calculate high flow mask
-    high_flow_mask = calculate_flow_extreme(daily_data_reg, flow_var, 'high', flow_threshold)
+    high_flow_mask = calculate_flow_extreme(daily_data_reg, flow_var, 'high', flow_threshold).load()
     
     # Get high flow event coordinates
     high_flow_time_lat_lon = get_true_coordinates(high_flow_mask)
     
     # Loop over all high flow events
     results = []
-    for i_high_flow, event_coords in enumerate(high_flow_time_lat_lon[205:]):
+    for i_high_flow, event_coords in enumerate(high_flow_time_lat_lon[:]):
         time_high_flow = np.datetime64(event_coords[0])
         lat_high_flow_reg = event_coords[1]
         lon_high_flow_reg = event_coords[2]
@@ -426,6 +434,8 @@ def main():
         basin_lon_reg = lon_lat_reg[point_bool][:, 0]
         basin_lat_reg = lon_lat_reg[point_bool][:, 1]
         print(f"Basin size: {len(basin_lat_reg)} pixels.")
+        if len(basin_lat_reg) < 10:
+            continue
         # Add high flow point to basin points
         # basin_lat_reg = np.append(basin_lat_reg, lat_high_flow_reg)
         # basin_lon_reg = np.append(basin_lon_reg, lon_high_flow_reg)
@@ -440,7 +450,7 @@ def main():
                         f'attribution_tests/upstream_basin_map.png')
             plot_streamflow_timeseries(
                 streamflow_data=daily_data_reg[flow_var], precip_data=daily_data_reg[precip_var], 
-                high_flow_mask=high_flow_mask, 
+                high_flow_mask=high_flow_mask, high_flow_time=time_high_flow,
                 location=(lat_high_flow_reg, lon_high_flow_reg), 
                 save_path=f'plots/high_low_flow_stat_plots/'
                         f'attribution_tests/annual_streamflow_timeseries.png')
@@ -469,10 +479,12 @@ def main():
         # Print report of correlation results
         print(f"Correlation results for high flow event {i_high_flow+1}/{len(high_flow_time_lat_lon)}:")
         if correlation[2] == 'precip':
-            print(f"Precip: {correlation[1]:.2f} at lag {correlation[0]} days")
+            print(f"Best correlation with precip: {correlation[1]:.2f} at lag {correlation[0]} days")
         elif correlation[2] == 'melt':
-            print(f"Melt: {correlation[1]:.2f} at lag {correlation[0]} days")
-        print('test')
+            print(f"Best correlation with melt: {correlation[1]:.2f} at lag {correlation[0]} days")
+        else: 
+            print("No significant correlation found.")
+
         
     #     results.append({
     #         'event': i_high_flow,
