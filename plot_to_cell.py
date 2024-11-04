@@ -45,7 +45,7 @@ def find_basin(rv_dir, idown, jdown):
     upstream_ij = [find_upstream_ij(rv_dir, idown, jdown)] # Get first upstream points
     upstream_ij = [
             v for v in upstream_ij if v is not None]
-    while len(upstream_ij) > 0: # Concatenate, as long as there are upstream points
+    while len(upstream_ij) > 0: # Concatenate, as long as there are upstream points 
         upstream_ij = np.concatenate(upstream_ij, axis=0)
         basin_ij = np.concatenate([
             basin_ij, upstream_ij], axis=0)
@@ -56,6 +56,9 @@ def find_basin(rv_dir, idown, jdown):
             ] 
         upstream_ij = [
             v for v in upstream_ij if v is not None]
+        # if basin_ij.shape[0] > 1000:
+        #     print(f'Basin size: {basin_ij.shape[0]}.')
+        #     return None
     return basin_ij
 
         
