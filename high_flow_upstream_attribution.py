@@ -4,6 +4,13 @@ import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 from shapely.geometry import MultiPoint, Polygon
 import os
+import matplotlib.pyplot as plt
+import numpy as np
+import xarray as xr
+from datetime import datetime
+import geopandas as gpd
+import json
+import argparse
 
 from store_low_high_flow_thresholds import (
     calculate_flow_extreme,
@@ -58,7 +65,7 @@ def find_nearest_grid_point(lat, lon, geolat, geolon):
     return x_idx, y_idx
 
 def perform_lagged_correlation(
-        precip, melt, streamflow, high_flow_time, lag_days, temporal_window=10,
+        precip, ar_precip, melt, streamflow, high_flow_time, lag_days, temporal_window=10,
         plot_lagged_timeseries=False, min_corr=0.8):
     """
     Performs lagged correlation analysis between precipitation/snow changes and streamflow within a temporal window.
@@ -82,27 +89,36 @@ def perform_lagged_correlation(
     """
     # Ensure the time dimension is sorted
     precip = precip.sortby('time')
+    ar_precip = ar_precip.sortby('time')
     streamflow = streamflow.sortby('time')
     melt = melt.sortby('time')
+    # Initialize best correlation values
     best_lag_precip = None
     best_corr_precip = -np.inf
+    best_corr_precip_window = None
+    best_lag_ar_precip = None
+    best_corr_ar_precip = -np.inf
+    best_corr_ar_precip_window = None
     best_lag_melt = None
     best_corr_melt = np.inf
+    best_corr_melt_window = None
+    best_corr_streamflow_window = None
 
     # Only positive lags since precipitation precedes streamflow
     for lag in lag_days:
         # Shift precipitation forward in time by 'lag' days
         shifted_precip = precip.shift(time=lag)
+        shifted_ar_precip = ar_precip.shift(time=lag)
         shifted_melt = melt.shift(time=lag)
         # Define the time window around the high_flow_time after shifting
         start_time = high_flow_time - np.timedelta64(int(temporal_window/2), 'D')
         end_time = high_flow_time + np.timedelta64(int(temporal_window/2), 'D')
 
         # Select the windowed data after shifting
-        precip_window = shifted_precip.sel(time=slice(start_time, end_time)).dropna(dim='time', how='any')
-        melt_window = shifted_melt.sel(time=slice(start_time, end_time)).dropna(dim='time', how='any')
-        streamflow_window = streamflow.sel(time=slice(start_time, end_time)).dropna(dim='time', how='any')
-        
+        precip_window = shifted_precip.sel(time=slice(start_time, end_time))
+        melt_window = shifted_melt.sel(time=slice(start_time, end_time))
+        streamflow_window = streamflow.sel(time=slice(start_time, end_time))
+        ar_precip_window = shifted_ar_precip.sel(time=slice(start_time, end_time))
         # Check if upstream precip and melt sum is greater than streamflow on high flow day
         # Minimum criterion for precip or melt to cause high streamflow
         if precip_window.sum() > streamflow_window.sum():
@@ -111,51 +127,72 @@ def perform_lagged_correlation(
             if corr_precip > best_corr_precip:
                 best_corr_precip = corr_precip
                 best_lag_precip = lag
+                best_corr_precip_window = precip_window
+                best_corr_streamflow_window = streamflow_window
         else:
-            print(f"Not enough precipitation to cause high flow on day {high_flow_time}")
+            print(f"Not enough precipitation to cause high flow on day {high_flow_time}", flush=True)
             corr_precip = np.nan
+        if ar_precip_window.sum() > streamflow_window.sum():
+            corr_matrix_ar_precip = np.corrcoef(ar_precip_window.values, streamflow_window.values)
+            corr_ar_precip = corr_matrix_ar_precip[0, 1]
+            if corr_ar_precip > best_corr_ar_precip:
+                best_corr_ar_precip = corr_ar_precip
+                best_lag_ar_precip = lag
+                best_corr_ar_precip_window = ar_precip_window
+                best_corr_streamflow_window = streamflow_window
+        else:
+            print(f"Not enough AR precipitation to cause high flow on day {high_flow_time}", flush=True)
+            corr_ar_precip = np.nan
         if np.abs(melt_window.sum()) > streamflow_window.sum():
             corr_matrix_melt = np.corrcoef(melt_window.values, streamflow_window.values)
             corr_melt = corr_matrix_melt[0, 1]
             if corr_melt < best_corr_melt:
                 best_corr_melt = corr_melt
                 best_lag_melt = lag
+                best_corr_melt_window = melt_window
+                best_corr_streamflow_window = streamflow_window
         else:
-            print(f"Not enough melt to cause high flow on day {high_flow_time}")
+            print(f"Not enough melt to cause high flow on day {high_flow_time}", flush=True)
             corr_melt = np.nan
-        if not np.isnan(corr_melt) and not np.isnan(corr_precip):
-            continue
         if plot_lagged_timeseries:
             plot_precip_streamflow_window(
-                high_flow_time, precip_window, melt_window, streamflow_window, 
-                lag, corr_precip, corr_melt, 
+                high_flow_time, precip_window, ar_precip_window, melt_window, streamflow_window, 
+                lag, corr_precip, corr_ar_precip, corr_melt, 
                 save_path='plots/high_low_flow_stat_plots/'
                           f'attribution_tests/streamflow_precip_melt_correlation_lag{lag}.png')
 
-    # If correlation with snow change is good, return snow
-    # Only return good correlation with precipitation if snow correlation is not good
-    if best_corr_melt < -min_corr:
-        return (best_lag_melt, best_corr_melt, 'melt')
+    # Return best correlation and source, 
+    # prioritizing AR precipitation, then precipitation, then melt
+    if best_corr_ar_precip > min_corr:
+        return ('ar_precip', best_corr_ar_precip, 
+                best_lag_ar_precip, best_corr_ar_precip_window, best_corr_streamflow_window)
     elif best_corr_precip > min_corr:
-        return (best_lag_precip, best_corr_precip, 'precip')
+        return ('precip', best_corr_precip, 
+                best_lag_precip, best_corr_precip_window, best_corr_streamflow_window)
+    elif best_corr_melt < -min_corr:
+        return ('melt', best_corr_melt, 
+                best_lag_melt, best_corr_melt_window, best_corr_streamflow_window)
     else:
-        return (None, None, None)
+        return (None, None, None, None, None)
     
 def plot_precip_streamflow_window(
-    high_flow_time, precip_window, melt_window, streamflow_window, lag, 
-    corr_precip, corr_melt, save_path
+    high_flow_time, precip_window, ar_precip_window, melt_window, streamflow_window, lag, 
+    corr_precip, corr_ar_precip, corr_melt, save_path
 ):
     """
-    Plots the time series of precipitation and streamflow around the high flow event with the applied lag.
-    Annotates the plot with the correlation coefficient.
+    Plots the time series of precipitation, AR precipitation, snow melt and streamflow around the high flow event 
+    with the applied lag. Annotates the plot with the correlation coefficients.
 
     Parameters:
-        event_number (int): The index of the high flow event.
         high_flow_time (np.datetime64 or pandas.Timestamp): The time of the high flow event.
         precip_window (xr.DataArray): Shifted precipitation time series within the window.
+        ar_precip_window (xr.DataArray): Shifted AR precipitation time series within the window.
+        melt_window (xr.DataArray): Shifted snow melt time series within the window.
         streamflow_window (xr.DataArray): Streamflow time series within the window.
-        lag (int): The lag time in days applied to precipitation.
-        correlation (float): The correlation coefficient between precipitation and streamflow.
+        lag (int): The lag time in days applied to precipitation and melt.
+        corr_precip (float): The correlation coefficient between precipitation and streamflow.
+        corr_ar_precip (float): The correlation coefficient between AR precipitation and streamflow.
+        corr_melt (float): The correlation coefficient between snow melt and streamflow.
         save_path (str): The file path where the plot will be saved.
     """
     fig = plt.figure(figsize=(12, 6))
@@ -165,6 +202,7 @@ def plot_precip_streamflow_window(
     
     # Plot precipitation on left axis
     ax1.plot(precip_window['time'], precip_window.values, label='Upstream Precipitation', color='blue')
+    ax1.plot(ar_precip_window['time'], ar_precip_window.values, label='Upstream AR Precipitation', color='lightblue')
     ax1.plot(melt_window['time'], melt_window.values, label='Upstream Snow Melt', color='blue', linestyle='--')
     ax1.set_ylabel('Precip + Snow Melt (kg day$^{-1}$)', color='blue')
     ax1.tick_params(axis='y', labelcolor='blue')
@@ -176,7 +214,7 @@ def plot_precip_streamflow_window(
     ax2.axvline(x=high_flow_time, color='green', linestyle='--', label='High Flow Event')
 
     fig.suptitle(f'Precipitation, snow cover change, and streamflow time series\n'
-              f'Lag: {lag} days, Corr Precip: {corr_precip:.2f}, Corr Melt: {corr_melt:.2f}')
+              f'Lag: {lag} days, Corr Precip: {corr_precip:.2f}, Corr AR Precip: {corr_ar_precip:.2f}, Corr Melt: {corr_melt:.2f}')
     ax1.set_xlabel('Time')
     ax1.legend(loc='upper left')
     ax2.legend(loc='upper right')
@@ -187,7 +225,7 @@ def plot_precip_streamflow_window(
 
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Plot saved to {save_path}")
+    print(f"Plot saved to {save_path}", flush=True)
 
 def plot_upstream_area_for_high_flow_point(
         basin_lon_cubic, basin_lat_cubic, basin_lon_reg, basin_lat_reg, lon_high_flow_reg, 
@@ -223,10 +261,7 @@ def plot_upstream_area_for_high_flow_point(
     # ax2.add_feature(cfeature.RIVERS, linewidth=0.5, edgecolor='blue', alpha=0.5)
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
 
-import matplotlib.pyplot as plt
-import numpy as np
-import xarray as xr
-from datetime import datetime
+
 
 def plot_streamflow_timeseries(streamflow_data: xr.DataArray, precip_data: xr.DataArray, 
                                high_flow_mask: xr.DataArray, high_flow_time: np.datetime64, 
@@ -286,22 +321,30 @@ def plot_streamflow_timeseries(streamflow_data: xr.DataArray, precip_data: xr.Da
     if save_path:
         plt.savefig(save_path, dpi=300)
         plt.close()
-        print(f"Streamflow timeseries plot saved to {save_path}")
+        print(f"Streamflow timeseries plot saved to {save_path}", flush=True)
     else:
         plt.show()
 
 def calculate_upstream_variables(daily_data_reg, land_area, basin_lat_reg, basin_lon_reg, 
-                                 lat_high_flow_reg, lon_high_flow_reg, precip_var, snow_var, 
+                                 lat_high_flow_reg, lon_high_flow_reg, precip_var, ar_precip_var, snow_var, 
                                  monthly_mean_flow_velocity, monthly_mean_streamflow):
-    upstream_precip = xr.concat([
-        daily_data_reg.sel(lat=lat, lon=lon)[precip_var] 
-        for lat, lon in zip(basin_lat_reg, basin_lon_reg)
-    ], dim='basin_point')
     upstream_land_area = xr.concat([
         land_area.sel(lat=lat, lon=lon)
         for lat, lon in zip(basin_lat_reg, basin_lon_reg)
     ], dim='basin_point')
+    # Upstream precipitation
+    upstream_precip = xr.concat([
+        daily_data_reg.sel(lat=lat, lon=lon)[precip_var] 
+        for lat, lon in zip(basin_lat_reg, basin_lon_reg)
+    ], dim='basin_point')
+    # Upstream AR precipitation
     upstream_precip_sum = (upstream_precip * upstream_land_area).sum(dim='basin_point').load()*86400
+    upstream_ar_precip = xr.concat([
+        daily_data_reg.sel(lat=lat, lon=lon)[ar_precip_var] 
+        for lat, lon in zip(basin_lat_reg, basin_lon_reg)
+    ], dim='basin_point')
+    upstream_ar_precip_sum = (upstream_ar_precip * upstream_land_area).sum(dim='basin_point').load()*86400
+    # Upstream snow
     upstream_snow = xr.concat([
         daily_data_reg.sel(lat=lat, lon=lon)['prsn'] 
         for lat, lon in zip(basin_lat_reg, basin_lon_reg)
@@ -313,11 +356,14 @@ def calculate_upstream_variables(daily_data_reg, land_area, basin_lat_reg, basin
     ], dim='basin_point')
     upstream_snow_cover_sum = (upstream_snow_cover * upstream_land_area).sum(dim='basin_point').load()
     upstream_snow_cover_sum_change = upstream_snow_cover_sum.differentiate('time')*1e9*86400
+    # Upstream melt
     upstream_melt_sum = upstream_snow_cover_sum_change - upstream_snow_sum
+    # High streamflow
     streamflow = (daily_data_reg.sel(
             lat=lat_high_flow_reg, lon=lon_high_flow_reg)['rv_o_h2o'] * \
                 land_area.sel(
                 lat=lat_high_flow_reg, lon=lon_high_flow_reg)).load()*86400
+    # Upstream mean streamflow
     monthly_mean_upstream_flow_velocity_mean = xr.concat([
         monthly_mean_flow_velocity.sel(lat=lat, lon=lon)
         for lat, lon in zip(basin_lat_reg, basin_lon_reg)
@@ -326,20 +372,129 @@ def calculate_upstream_variables(daily_data_reg, land_area, basin_lat_reg, basin
             lat=lat_high_flow_reg, lon=lon_high_flow_reg) * \
                 land_area.sel(
                 lat=lat_high_flow_reg, lon=lon_high_flow_reg)).load()*86400
-    return (upstream_precip_sum, upstream_melt_sum, streamflow, 
+    return (upstream_precip_sum, upstream_ar_precip_sum, upstream_melt_sum, streamflow, 
             monthly_mean_upstream_flow_velocity_mean, monthly_mean_streamflow, 
             upstream_land_area.sum('basin_point'))
 
+def store_correlation_results_to_geodataframe(results, output_filepath):
+    """
+    Stores the correlation analysis results into a GeoDataFrame and saves it to a file.
+
+    Parameters:
+        results (list of dict): List containing dictionaries with correlation analysis results for each high flow event.
+        output_filepath (str): File path to save the GeoDataFrame (e.g., 'results/correlation_results.geojson').
+
+    The GeoDataFrame includes the following columns:
+        - high_flow_event (int): Identifier for the high flow event.
+        - time (numpy.datetime64): Time of the high flow event.
+        - lon_reg (float): Longitude on the regular grid.
+        - lat_reg (float): Latitude on the regular grid.
+        - lon_cubic (float): Longitude on the cubic grid.
+        - lat_cubic (float): Latitude on the cubic grid.
+        - upstream_basin_shape (Polygon): Shapely Polygon representing the upstream basin.
+        - high_flow_streamflow (float): Streamflow on the high flow day.
+        - upstream_length_scale (float): Calculated upstream length scale.
+        - upstream_flow_velocity_mean (float): Mean upstream flow velocity.
+        - scaled_upstream_flow_velocity_mean (float): Scaled upstream flow velocity mean.
+        - streamflow_timescale (int): Streamflow timescale in days.
+        - best_corr_lag_days (int, optional): Best lag days for correlation.
+        - best_corr_var (str, optional): Variable with the best correlation ('precip', 'ar_precip', or 'melt').
+        - best_corr_value (float, optional): Best correlation coefficient value.
+        - best_corr_var_window_json (str, optional): JSON string of window values of best correlated variable.
+        - streamflow_window_values_json (str, optional): JSON string of streamflow window values.
+    """
+    
+    # Prepare data for GeoDataFrame
+    data = []
+    for event in results:
+        event_data = {
+            'high_flow_event': event['event'],
+            'time': event['time'],
+            'lon_reg': float(event['lon_reg']),
+            'lat_reg': float(event['lat_reg']),
+            'lon_cubic': float(event['lon_cubic']),
+            'lat_cubic': float(event['lat_cubic']),
+            'upstream_basin_shape': event['upstream_basin_shape'],
+            'high_flow_streamflow': float(event['high_flow_streamflow']),
+            'upstream_length_scale': float(event['upstream_length_scale']),
+            'upstream_flow_velocity_mean': float(event['upstream_flow_velocity_mean']),
+            'scaled_upstream_flow_velocity_mean': float(event['scaled_upstream_flow_velocity_mean']),
+            'streamflow_timescale': int(event['streamflow_timescale'])
+        }
+
+        # Add correlation results if available
+        if event['correlation']:
+            corr = event['correlation']
+            # Convert numpy arrays to lists and then to JSON strings
+            best_corr_var_window = corr.get('best_corr_var_window_values')
+            streamflow_window = corr.get('streamflow_window_values')
+            
+            event_data.update({
+                'best_corr_lag_days': corr.get('best_lag_days'),
+                'best_corr_var': corr.get('best_corr_var'),
+                'best_corr_value': corr.get('best_corr_value'),
+                'best_corr_var_window': json.dumps(best_corr_var_window.values.tolist()) if best_corr_var_window is not None else None,
+                'streamflow_window': json.dumps(streamflow_window.values.tolist()) if streamflow_window is not None else None
+            })
+        else:
+            event_data.update({
+                'best_corr_lag_days': None,
+                'best_corr_var': None,
+                'best_corr_value': None,
+                'best_corr_var_window_json': None,
+                'streamflow_window_values_json': None
+            })
+
+        data.append(event_data)
+
+    # Create GeoDataFrame
+    gdf = gpd.GeoDataFrame(data, geometry='upstream_basin_shape')
+
+    # Set coordinate reference system (CRS) if known, e.g., WGS84
+    gdf.set_crs(epsg=4326, inplace=True)
+
+    # Save to file
+    gdf.to_file(output_filepath, driver='GeoJSON')
+    print(f"Correlation results saved to {output_filepath}", flush=True)
+
+def read_high_flow_events(filepath):
+    """
+    Reads high flow events from a GeoJSON file, including any stored lists.
+
+    Parameters:
+        filepath (str): Path to the GeoJSON file containing high flow events
+
+    Returns:
+        gpd.GeoDataFrame: GeoDataFrame containing the high flow events with parsed data
+    """
+    # Read the GeoJSON file with lists as strings
+    gdf = gpd.read_file(filepath, converters={
+        'best_corr_var_window': lambda x: np.array(json.loads(x)) if isinstance(x, str) else None,
+        'streamflow_window': lambda x: np.array(json.loads(x)) if isinstance(x, str) else None
+    })
+
+    return gdf
+
 def main():
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Process high flow events for a given year and experiment')
+    parser.add_argument('--year', type=int, help='Year to process', default=1980)
+    parser.add_argument('--exp_name', type=str, help='Experiment name', default='c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min')
+    
+    # Parse arguments
+    args = parser.parse_args()
+    
+    # Extract arguments
+    year = args.year
+    exp_name = args.exp_name
     base_path = '/archive/Ming.Zhao/awg/2023.04/'
     gfdl_processor = 'gfdl.ncrc5-intel23-classic-prod-openmp'
-    year = 1980
     flow_var = 'rv_o_h2o'
     precip_var = 'prli'
+    ar_precip_var = 'ar_prli'
     snow_var = 'snw'
     variables = [flow_var, precip_var, snow_var, 'pr', 'prsn',]
-    exp_name = 'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min'
-    ar_condition = False
+    ar_condition = True
     min_ar_pr_threshold = 1/86400
     low_pr_value = 0
     min_pr_var = precip_var
@@ -355,7 +510,8 @@ def main():
     # Load flow threshold
     flow_threshold = xr.open_dataarray(
         f'/archive/Marc.Prange/discharge_statistics/'
-        f'{exp_name}/flow_1p0_year-1_threshold_{exp_name}_1980_2019.nc')
+        f'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min/flow_1p0_year-1_threshold_'
+        f'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min_1980_2019.nc')
     flow_threshold = lon_180_to_360(sel_conus_land(flow_threshold))
 
     # Load clim mean flow velocities
@@ -396,9 +552,12 @@ def main():
     # Get high flow event coordinates
     high_flow_time_lat_lon = get_true_coordinates(high_flow_mask)
     
+    # Create MultiPoint object for regular grid points
+    lon_lat_reg = np.vstack([(lon, lat) for lon in daily_data_reg.lon for lat in daily_data_reg.lat])
+    reg_lon_lat_MP = MultiPoint(lon_lat_reg)
     # Loop over all high flow events
     results = []
-    for i_high_flow, event_coords in enumerate(high_flow_time_lat_lon[:]):
+    for i_high_flow, event_coords in enumerate(high_flow_time_lat_lon):
         time_high_flow = np.datetime64(event_coords[0])
         lat_high_flow_reg = event_coords[1]
         lon_high_flow_reg = event_coords[2]
@@ -411,9 +570,10 @@ def main():
             geolat_cubic, geolon_cubic)
         lat_high_flow_cubic = geolat_cubic[igrid, jgrid].values
         lon_high_flow_cubic = geolon_cubic[igrid, jgrid].values
-        print(f"Processing high flow event {i_high_flow+1}/{len(high_flow_time_lat_lon)}:")
-        print(f"Regular Grid - Lat: {lat_high_flow_reg}, Lon: {lon_high_flow_reg}")
-        print(f"Cubic Grid - Lat: {lat_high_flow_cubic}, Lon: {lon_high_flow_cubic}")
+        print(f"Processing high flow event {i_high_flow+1}/{len(high_flow_time_lat_lon)}:", flush=True)
+        print(f"Time: {time_high_flow}", flush=True)
+        print(f"Regular Grid - Lat: {lat_high_flow_reg}, Lon: {lon_high_flow_reg}", flush=True)
+        print(f"Cubic Grid - Lat: {lat_high_flow_cubic}, Lon: {lon_high_flow_cubic}", flush=True)
         
         # Find basin
         basin_ij = find_basin(river_dir_cubic, igrid, jgrid)
@@ -421,24 +581,18 @@ def main():
                               for i, j in zip(basin_ij[:, 0], basin_ij[:, 1])])
         basin_lon_cubic = np.array([geolon_cubic[i, j] 
                               for i, j in zip(basin_ij[:, 0], basin_ij[:, 1])])
-        # if len(basin_lat_cubic) < 5 or len(basin_lat_cubic) > 50:
+        print(f"Basin size: {len(basin_lat_cubic)} pixels.", flush=True)
+        # if len(basin_lat_cubic) < 8:
         #     continue
         basin_lon_lat_cubic = np.vstack([basin_lon_cubic, basin_lat_cubic]).T
         basin_polygon_cubic = MultiPoint(basin_lon_lat_cubic).buffer(
-                                0.5, cap_style='square', join_style='mitre').buffer(
-                                -0.25, cap_style='square', join_style='mitre')
-        lon_lat_reg = np.vstack([(lon, lat) for lon in daily_data_reg.lon for lat in daily_data_reg.lat])
-        reg_lon_lat_MP = MultiPoint(lon_lat_reg)
+                                0.55, cap_style='square', join_style='mitre').buffer(
+                                -0.25, cap_style='square', join_style='mitre') 
         point_bool = np.array([basin_polygon_cubic.contains(point) 
                                for point in reg_lon_lat_MP.geoms])
         basin_lon_reg = lon_lat_reg[point_bool][:, 0]
         basin_lat_reg = lon_lat_reg[point_bool][:, 1]
-        print(f"Basin size: {len(basin_lat_reg)} pixels.")
-        if len(basin_lat_reg) < 10:
-            continue
-        # Add high flow point to basin points
-        # basin_lat_reg = np.append(basin_lat_reg, lat_high_flow_reg)
-        # basin_lon_reg = np.append(basin_lon_reg, lon_high_flow_reg)
+
         interior_basin_rings_cubic = [ring.xy for ring in basin_polygon_cubic.interiors]
         # Plot upstream basin map
         if do_test_plots:
@@ -456,12 +610,12 @@ def main():
                         f'attribution_tests/annual_streamflow_timeseries.png')
         
         # Extract upstream precipitation, snow cover change and streamflow
-        (upstream_precip_sum, upstream_melt_sum, streamflow, 
+        (upstream_precip_sum, upstream_ar_precip_sum, upstream_melt_sum, streamflow, 
          upstream_flow_velocity_mean, monthly_mean_streamflow, upstream_land_area_sum,) = \
             calculate_upstream_variables(
                 daily_data_reg, land_area, basin_lat_reg, basin_lon_reg,
-                lat_high_flow_reg, lon_high_flow_reg, precip_var, snow_var, 
-                monthly_mean_flow_velocity, monthly_mean_streamflow)
+                lat_high_flow_reg, lon_high_flow_reg, precip_var, ar_precip_var, 
+                snow_var, monthly_mean_flow_velocity, monthly_mean_streamflow)
         
         # Calculate length scale of upstream basin and streamflow timescale
         upstream_length_scale = np.sqrt(upstream_land_area_sum/np.pi) # m^2
@@ -473,36 +627,49 @@ def main():
         lag_days = np.arange(streamflow_timescale - 1, streamflow_timescale + 2)
         # Perform lagged correlation
         correlation = perform_lagged_correlation(
-            upstream_precip_sum, upstream_melt_sum, streamflow, time_high_flow, 
+            upstream_precip_sum, upstream_ar_precip_sum, upstream_melt_sum, streamflow, time_high_flow, 
             lag_days=lag_days, temporal_window=streamflow_timescale, 
             plot_lagged_timeseries=do_test_plots)
         # Print report of correlation results
-        print(f"Correlation results for high flow event {i_high_flow+1}/{len(high_flow_time_lat_lon)}:")
-        if correlation[2] == 'precip':
-            print(f"Best correlation with precip: {correlation[1]:.2f} at lag {correlation[0]} days")
+        print(f"Correlation results for high flow event {i_high_flow+1}/{len(high_flow_time_lat_lon)}:", flush=True)
+        if correlation[2] == 'ar_precip':
+            print(f"Best correlation with AR precipitation: {correlation[1]:.2f} at lag {correlation[0]} days", flush=True)
+        elif correlation[2] == 'precip':
+            print(f"Best correlation with precipitation: {correlation[1]:.2f} at lag {correlation[0]} days", flush=True)
         elif correlation[2] == 'melt':
-            print(f"Best correlation with melt: {correlation[1]:.2f} at lag {correlation[0]} days")
+            print(f"Best correlation with melt: {correlation[1]:.2f} at lag {correlation[0]} days", flush=True)
         else: 
-            print("No significant correlation found.")
+            print("No significant correlation found.", flush=True)
+        # Collect results
+        event_result = {
+            'event': i_high_flow + 1,
+            'time': time_high_flow,
+            'lon_reg': lon_high_flow_reg,
+            'lat_reg': lat_high_flow_reg,
+            'lon_cubic': lon_high_flow_cubic,
+            'lat_cubic': lat_high_flow_cubic,
+            'upstream_basin_shape': basin_polygon_cubic,
+            'high_flow_streamflow': streamflow.sel(time=time_high_flow).values,
+            'upstream_length_scale': upstream_length_scale,
+            'upstream_flow_velocity_mean': upstream_flow_velocity_mean.values,
+            'scaled_upstream_flow_velocity_mean': scaled_upstream_flow_velocity_mean.values,
+            'streamflow_timescale': streamflow_timescale,
+            'correlation': None
+        }
+        if correlation[0]:
+            event_result['correlation'] = {
+                'best_corr_value': correlation[1],
+                'best_corr_var': correlation[0],
+                'best_lag_days': correlation[2],
+                'best_corr_var_window_values': correlation[3], 
+                'streamflow_window_values': correlation[4], 
+            }
+        results.append(event_result)
 
-        
-    #     results.append({
-    #         'event': i_high_flow,
-    #         'regular_grid_point': (lat_high_flow_reg, lon_high_flow_reg),
-    #         'cubic_grid_point': (lat_high_flow_cubic, lon_high_flow_cubic),
-    #         'correlation': correlation
-    #     })
-    
-    # # Example: Plot correlation for first event
-    # if results:
-    #     first_corr = results[0]['correlation']
-    #     plt.figure(figsize=(10,5))
-    #     first_corr.plot()
-    #     plt.title(f'Lagged Correlation for High Flow Event {results[0]["event"]}')
-    #     plt.xlabel('Lag (days)')
-    #     plt.ylabel('Correlation Coefficient')
-    #     plt.grid(True)
-    #     plt.show()
-
+    store_correlation_results_to_geodataframe(
+        results, 
+        output_filepath=f'/archive/m2p/high_flow_event_attribution/'
+                        f'{exp_name}/correlation_results_{year}.geojson'
+    )
 if __name__ == "__main__":
     main()
