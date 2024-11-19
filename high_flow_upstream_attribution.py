@@ -11,6 +11,7 @@ from datetime import datetime
 import geopandas as gpd
 import json
 import argparse
+import cartopy.feature as cfeature
 
 from store_low_high_flow_thresholds import (
     calculate_flow_extreme,
@@ -18,6 +19,7 @@ from store_low_high_flow_thresholds import (
 )
 from plot_to_cell import find_basin, find_upstream_ij
 from data_util import sel_conus_land, lon_180_to_360, load_model_data
+from basin_scale_analysis import load_static_cubic_data
 
 def get_true_coordinates(dataarray: xr.DataArray) -> list:
     """
@@ -56,7 +58,7 @@ def find_nearest_grid_point(lat, lon, geolat, geolon):
     """
 
     # Calculate the squared distance between the input point and all grid points
-    distance_sq = (geolat.values - lat) ** 2 + (geolon.values - lon) ** 2
+    distance_sq = (geolat - lat) ** 2 + (geolon - lon) ** 2
 
     # Find the index of the minimum distance
     flat_index = np.nanargmin(distance_sq)
@@ -96,12 +98,22 @@ def perform_lagged_correlation(
     best_lag_precip = None
     best_corr_precip = -np.inf
     best_corr_precip_window = None
+
     best_lag_ar_precip = None
     best_corr_ar_precip = -np.inf
     best_corr_ar_precip_window = None
+
     best_lag_melt = None
     best_corr_melt = np.inf
     best_corr_melt_window = None
+
+    best_lag_precip_melt = None
+    best_corr_precip_melt = -np.inf
+    best_corr_precip_melt_window = None
+    
+    best_lag_ar_precip_melt = None
+    best_corr_ar_precip_melt = -np.inf
+    best_corr_ar_precip_melt_window = None
     best_corr_streamflow_window = None
 
     # Only positive lags since precipitation precedes streamflow
@@ -130,7 +142,7 @@ def perform_lagged_correlation(
                 best_corr_precip_window = precip_window
                 best_corr_streamflow_window = streamflow_window
         else:
-            print(f"Not enough precipitation to cause high flow on day {high_flow_time}", flush=True)
+            # print(f"Not enough precipitation to cause high flow on day {high_flow_time}", flush=True)
             corr_precip = np.nan
         if ar_precip_window.sum() > streamflow_window.sum():
             corr_matrix_ar_precip = np.corrcoef(ar_precip_window.values, streamflow_window.values)
@@ -141,7 +153,7 @@ def perform_lagged_correlation(
                 best_corr_ar_precip_window = ar_precip_window
                 best_corr_streamflow_window = streamflow_window
         else:
-            print(f"Not enough AR precipitation to cause high flow on day {high_flow_time}", flush=True)
+            # print(f"Not enough AR precipitation to cause high flow on day {high_flow_time}", flush=True)
             corr_ar_precip = np.nan
         if np.abs(melt_window.sum()) > streamflow_window.sum():
             corr_matrix_melt = np.corrcoef(melt_window.values, streamflow_window.values)
@@ -152,8 +164,32 @@ def perform_lagged_correlation(
                 best_corr_melt_window = melt_window
                 best_corr_streamflow_window = streamflow_window
         else:
-            print(f"Not enough melt to cause high flow on day {high_flow_time}", flush=True)
+            # print(f"Not enough melt to cause high flow on day {high_flow_time}", flush=True)
             corr_melt = np.nan
+        if np.abs(precip_window.sum() - melt_window.sum()) > streamflow_window.sum():
+            corr_matrix_precip_melt = np.corrcoef(
+                precip_window.values-melt_window.values, streamflow_window.values)
+            corr_precip_melt = corr_matrix_precip_melt[0, 1]
+            if corr_precip_melt > best_corr_precip_melt:
+                best_corr_precip_melt = corr_precip_melt
+                best_lag_precip_melt = lag
+                best_corr_precip_melt_window = precip_window-melt_window
+                best_corr_streamflow_window = streamflow_window
+        else:
+            # print(f"Not enough precip-melt to cause high flow on day {high_flow_time}", flush=True)
+            corr_precip_melt = np.nan
+        if np.abs(ar_precip_window.sum() - melt_window.sum()) > streamflow_window.sum():
+            corr_matrix_ar_precip_melt = np.corrcoef(
+                ar_precip_window.values-melt_window.values, streamflow_window.values)
+            corr_ar_precip_melt = corr_matrix_ar_precip_melt[0, 1]
+            if corr_ar_precip_melt > best_corr_ar_precip_melt:
+                best_corr_ar_precip_melt = corr_ar_precip_melt
+                best_lag_ar_precip_melt = lag
+                best_corr_ar_precip_melt_window = ar_precip_window-melt_window
+                best_corr_streamflow_window = streamflow_window
+        else:
+            # print(f"Not enough AR precip-melt to cause high flow on day {high_flow_time}", flush=True)
+            corr_ar_precip_melt = np.nan
         if plot_lagged_timeseries:
             plot_precip_streamflow_window(
                 high_flow_time, precip_window, ar_precip_window, melt_window, streamflow_window, 
@@ -172,6 +208,12 @@ def perform_lagged_correlation(
     elif best_corr_melt < -min_corr:
         return ('melt', best_corr_melt, 
                 best_lag_melt, best_corr_melt_window, best_corr_streamflow_window)
+    elif best_corr_ar_precip_melt > min_corr:
+        return ('ar_precip_melt', best_corr_ar_precip_melt, 
+                best_lag_ar_precip_melt, best_corr_ar_precip_melt_window, best_corr_streamflow_window)
+    elif best_corr_precip_melt > min_corr:
+        return ('precip_melt', best_corr_precip_melt, 
+                best_lag_precip_melt, best_corr_precip_melt_window, best_corr_streamflow_window)
     else:
         return (None, None, None, None, None)
     
@@ -200,25 +242,25 @@ def plot_precip_streamflow_window(
     ax1 = plt.gca()
     ax2 = ax1.twinx()
     
-    # Plot precipitation on left axis
-    ax1.plot(precip_window['time'], precip_window.values, label='Upstream Precipitation', color='blue')
-    ax1.plot(ar_precip_window['time'], ar_precip_window.values, label='Upstream AR Precipitation', color='lightblue')
-    ax1.plot(melt_window['time'], melt_window.values, label='Upstream Snow Melt', color='blue', linestyle='--')
-    ax1.set_ylabel('Precip + Snow Melt (kg day$^{-1}$)', color='blue')
-    ax1.tick_params(axis='y', labelcolor='blue')
-    
     # Plot streamflow on right axis  
-    ax2.plot(streamflow_window['time'], streamflow_window.values, label='Streamflow', color='green')
-    ax2.set_ylabel('Streamflow (kg day$^{-1}$)', color='green')
-    ax2.tick_params(axis='y', labelcolor='green')
-    ax2.axvline(x=high_flow_time, color='green', linestyle='--', label='High Flow Event')
+    ax1.plot(streamflow_window['time'], streamflow_window.values, label='Streamflow', color='green')
+    ax1.set_ylabel('Streamflow (kg day$^{-1}$)', color='black')
+    ax1.tick_params(axis='y', labelcolor='black')
+    ax1.scatter(high_flow_time, streamflow_window.sel(time=high_flow_time).values, marker='o', color='red', label='High Flow Event')
 
+    # Plot precipitation on left axis
+    ax2.plot(precip_window['time'], precip_window.values, label='Upstream Precipitation', color='mediumblue')
+    ax2.plot(ar_precip_window['time'], ar_precip_window.values, label='Upstream AR Precipitation', color='cornflowerblue')
+    ax2.plot(melt_window['time'], melt_window.values, label='Upstream Snow Melt', color='purple')
+
+    ax2.set_ylabel('Precip + Snow Melt (kg day$^{-1}$)', color='mediumblue')
+    ax2.tick_params(axis='y', labelcolor='mediumblue')
     fig.suptitle(f'Precipitation, snow cover change, and streamflow time series\n'
               f'Lag: {lag} days, Corr Precip: {corr_precip:.2f}, Corr AR Precip: {corr_ar_precip:.2f}, Corr Melt: {corr_melt:.2f}')
     ax1.set_xlabel('Time')
     ax1.legend(loc='upper left')
     ax2.legend(loc='upper right')
-    plt.grid(True)
+    # plt.grid(True)
 
     # Ensure the directory exists
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -231,91 +273,118 @@ def plot_upstream_area_for_high_flow_point(
         basin_lon_cubic, basin_lat_cubic, basin_lon_reg, basin_lat_reg, lon_high_flow_reg, 
         lat_high_flow_reg, lon_high_flow_cubic, lat_high_flow_cubic, basin_polygon_cubic, 
         basin_polygon, interior_basin_rings, 
+        plot_cubic=True,
+        plot_reg=True,
         save_path='plots/high_low_flow_stat_plots/'
                  f'attribution_tests/upstream_basin_map.png'):
-    fig = plt.figure(figsize=(10,5))
-    ax1 = fig.add_subplot(1, 2, 1, projection=ccrs.PlateCarree())
-    ax1.scatter(basin_lon_cubic, basin_lat_cubic, marker='o', color='blue', label='upstream basin,\ncubic grid')
-    ax1.scatter(basin_lon_reg, basin_lat_reg, marker='x', color='red', label='upstream basin,\nregular grid')
-    ax1.scatter(lon_high_flow_reg, lat_high_flow_reg, marker='x', color='green', label='high flow point,\nregular grid')
-    ax1.scatter(lon_high_flow_cubic, lat_high_flow_cubic, marker='o', color='green', label='high flow point,\ncubic grid')
-    ax1.plot(*basin_polygon_cubic.exterior.xy, color='black', label='basin boundary', transform=ccrs.PlateCarree())
+    fig = plt.figure(figsize=(10, 5))
+    ax1 = fig.add_subplot(1, 2, 1, projection=ccrs.PlateCarree()) 
+    ax1.plot(*basin_polygon_cubic.exterior.xy, color='black', label='basin boundary', transform=ccrs.PlateCarree(), linewidth=2)
     for ring in interior_basin_rings:   
-        ax1.plot(*ring, color='black', linestyle='-', transform=ccrs.PlateCarree())
+        ax1.plot(*ring, color='black', linestyle='-', transform=ccrs.PlateCarree(), linewidth=2)
+
     ax2 = fig.add_subplot(1, 2, 2, projection=ccrs.PlateCarree())
-    ax2.scatter(basin_lon_cubic, basin_lat_cubic, marker='o', color='blue', label='upstream basin,\ncubic grid')
-    ax2.scatter(basin_lon_reg, basin_lat_reg, marker='x', color='red', label='upstream basin,\nregular grid')
-    ax2.scatter(lon_high_flow_reg, lat_high_flow_reg, marker='x', color='green', label='high flow point,\nregular grid')
-    ax2.scatter(lon_high_flow_cubic, lat_high_flow_cubic, marker='o', color='green', label='high flow point,\ncubic grid')
-    ax2.plot(*basin_polygon.exterior.xy, color='black', label='basin boundary', transform=ccrs.PlateCarree())
+    if plot_cubic:
+        ax2.scatter(basin_lon_cubic, basin_lat_cubic, marker='o', color='blue', label='upstream basin', linewidth=2, s=40)
+        ax2.scatter(lon_high_flow_cubic, lat_high_flow_cubic, marker='o', color='green', label='high flow point', linewidth=2, s=40)
+    if plot_reg:
+        ax2.scatter(basin_lon_reg, basin_lat_reg, marker='X', color='red', label='upstream basin', linewidth=2, s=40)
+        ax2.scatter(lon_high_flow_reg, lat_high_flow_reg, marker='X', color='green', label='high flow point', linewidth=2, s=80)
+    ax2.plot(*basin_polygon.exterior.xy, color='black', label='upstream basin\nboundary', transform=ccrs.PlateCarree(), linewidth=2)
     for ring in interior_basin_rings:
-        ax2.plot(*ring, color='black', linestyle='-', transform=ccrs.PlateCarree())
-    ax1.coastlines()
+        ax2.plot(*ring, color='black', linestyle='-', transform=ccrs.PlateCarree(), linewidth=2)
+    if plot_cubic:
+        ax1.scatter(basin_lon_cubic, basin_lat_cubic, marker='o', color='blue', label='upstream basin', linewidth=2, s=300)
+        ax1.scatter(lon_high_flow_cubic, lat_high_flow_cubic, marker='o', color='green', label='high flow point', linewidth=2, s=300)
+    if plot_reg:
+        ax1.scatter(basin_lon_reg, basin_lat_reg, marker='X', color='red', label='upstream basin', linewidth=2, s=300)
+        ax1.scatter(lon_high_flow_reg, lat_high_flow_reg, marker='X', color='green', label='high flow point', linewidth=2, s=300)
+    ax1.coastlines(linewidth=2)
     # ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     # Set region to CONUS
-    ax2.set_extent([-125, -60, 25, 50])
-    ax2.coastlines()
-    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax2.set_extent([-90, -75, 25, 40])
+    ax2.coastlines(linewidth=2)
+    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=14)
+    
     # Add rivers to both plots
-    # ax1.add_feature(cfeature.RIVERS, linewidth=0.5, edgecolor='blue', alpha=0.5)
-    # ax2.add_feature(cfeature.RIVERS, linewidth=0.5, edgecolor='blue', alpha=0.5)
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    ax1.add_feature(cfeature.RIVERS, linewidth=2, edgecolor='blue', alpha=0.5)
+    ax1.add_feature(cfeature.STATES, linewidth=1, edgecolor='black', alpha=0.5)
+    ax1.add_feature(cfeature.BORDERS, linewidth=1, edgecolor='black', alpha=0.5)
+    ax2.add_feature(cfeature.STATES, linewidth=1, edgecolor='black', alpha=0.5)
+    ax2.add_feature(cfeature.BORDERS, linewidth=1, edgecolor='black', alpha=0.5)
+    ax2.add_feature(cfeature.RIVERS, linewidth=2, edgecolor='blue', alpha=0.5)
+    for spine in ax1.spines.values():
+        spine.set_linewidth(2)
+    for spine in ax2.spines.values():
+        spine.set_linewidth(2)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
 
 
 
 def plot_streamflow_timeseries(streamflow_data: xr.DataArray, precip_data: xr.DataArray, 
+                               ar_precip_data: xr.DataArray, melt_data: xr.DataArray,
                                high_flow_mask: xr.DataArray, high_flow_time: np.datetime64, 
                                location: tuple, save_path: str = None):
     """
     Plots the time series of daily streamflow for a given location, marking the identified high flow events.
 
     Parameters:
-        streamflow_data (xr.DataArray): Time series of streamflow with dimensions (time, lat, lon).
+        streamflow_data (xr.DataArray): Time series of streamflow with dimensions (time).
+        precip_data (xr.DataArray): Time series of precipitation with dimensions (time).
+        ar_precip_data (xr.DataArray): Time series of AR precipitation with dimensions (time).
+        melt_data (xr.DataArray): Time series of melt with dimensions (time).
         high_flow_mask (xr.DataArray): Boolean mask indicating high flow events with the same dimensions as streamflow_data.
         location (tuple): A tuple of (latitude, longitude) specifying the location to plot.
         save_path (str, optional): File path to save the plot. If None, the plot is displayed.
-
-    Raises:
-        ValueError: If the specified location is not found in the data.
     """
-    lat, lon = location
-
-    # Select the nearest grid point to the specified location
-    try:
-        streamflow_point = streamflow_data.sel(lat=lat, lon=lon, method='nearest')
-        precip_point = precip_data.sel(lat=lat, lon=lon, method='nearest')
-        high_flow_point = high_flow_mask.sel(lat=lat, lon=lon, method='nearest')
-    except KeyError:
-        raise ValueError(f"Location ({lat}, {lon}) not found in the data.")
-
     # Extract time series data
-    time = streamflow_point['time'].values
-    streamflow_values = streamflow_point.values
-    precip_values = precip_point.values
-    high_flow_events = streamflow_point['time'].values[high_flow_point.values]
-    high_flow_value = streamflow_point.sel(time=high_flow_time).values
+    time = streamflow_data['time'].values
+    time_window = np.arange(high_flow_time - np.timedelta64(30, 'D'), high_flow_time + np.timedelta64(30, 'D'), dtype='datetime64[D]')
+    lat, lon = location
+    streamflow_values = streamflow_data.sel(time=time_window).values
+    precip_values = precip_data.sel(time=time_window).values
+    ar_precip_values = ar_precip_data.sel(time=time_window).values
+    melt_values = melt_data.sel(time=time_window).values
+    high_flow_mask = high_flow_mask.sel(lat=lat, lon=lon, time=time_window)
+    high_flow_events = time_window[high_flow_mask]
+    high_flow_value = streamflow_data.sel(time=high_flow_time).values
 
     # Create the plot
-    plt.figure(figsize=(14, 7))
+    plt.figure(figsize=(10, 5))
     # Create primary axis for streamflow
     ax1 = plt.gca()
-    ax1.plot(time, streamflow_values, label='Daily Streamflow', color='blue')
-    ax1.set_ylabel('Streamflow (kg day$^{-1}$)')
+    ax1.plot(time_window, streamflow_values, label='Daily Streamflow', color='black', linewidth=2)
+    ax1.set_ylabel('Streamflow (kg day$^{-1}$)', fontsize=16)
+    ax1.tick_params(axis='both', which='major', labelsize=14)
     
-    # Create secondary axis for precipitation
-    ax2 = ax1.twinx()
-    ax2.plot(time, precip_values, label='Daily Precipitation', color='green')
-    ax2.set_ylabel('Precipitation (kg m$^{-2}$ s$^{-1}$)', color='green')
-    ax2.tick_params(axis='y', labelcolor='green')
+    # Create secondary axis for precipitation, AR precipitation, and melt
+    # ax2 = ax1.twinx()
+    # ax2.plot(time_window, precip_values, label='Upstream Precipitation', color='mediumblue', linewidth=2)
+    # ax2.plot(time_window, ar_precip_values, label='Upstream AR Precipitation', color='cornflowerblue', linewidth=2)
+    # ax2.plot(time_window, melt_values, label='Upstream Melt', color='purple', linewidth=2)
+    # ax2.set_ylabel('Precip & Melt (kg day$^{-1}$)', color='mediumblue', fontsize=16)
+    # ax2.tick_params(axis='y', labelcolor='mediumblue', labelsize=14)
     # Mark high flow events
-    ax1.scatter(high_flow_events, streamflow_values[high_flow_point.values], 
-                color='gray', marker='o', label='High Flow Events')
-    ax1.scatter(high_flow_time, high_flow_value, color='red', marker='o', label='High Flow Event')
+    ax1.scatter(high_flow_events, streamflow_values[high_flow_mask], 
+                color='gray', marker='o', label='High Flow Events', s=50)
+    ax1.scatter(high_flow_time, high_flow_value, color='red', marker='o', label='High Flow Event', s=50)
 
-    ax1.set_title(f'Daily Streamflow at Location (Lat: {lat}, Lon: {lon})')
-    ax1.set_xlabel('Time')
-    ax1.legend()
-    plt.grid(True)
+    # ax1.set_title(f'Daily Streamflow at Location (Lat: {lat}, Lon: {lon})', fontsize=16)
+    ax1.set_xlabel('Time', fontsize=16)
+    ax1.set_xticklabels(ax1.get_xticklabels(), rotation=20)
+    ax1.legend(loc='upper left', fontsize=14)
+    # ax2.legend(loc='upper right', fontsize=14)
+    # Increase thickness of axis lines
+    ax1.spines['top'].set_linewidth(2)
+    ax1.spines['right'].set_linewidth(2)
+    ax1.spines['bottom'].set_linewidth(2)
+    ax1.spines['left'].set_linewidth(2)
+    # ax2.spines['top'].set_linewidth(2)
+    # ax2.spines['right'].set_linewidth(2)
+    # ax2.spines['bottom'].set_linewidth(2)
+    # ax2.spines['left'].set_linewidth(2)
+    # plt.grid(True)
     plt.tight_layout()
 
     if save_path:
@@ -433,8 +502,10 @@ def store_correlation_results_to_geodataframe(results, output_filepath):
                 'best_corr_lag_days': corr.get('best_lag_days'),
                 'best_corr_var': corr.get('best_corr_var'),
                 'best_corr_value': corr.get('best_corr_value'),
-                'best_corr_var_window': json.dumps(best_corr_var_window.values.tolist()) if best_corr_var_window is not None else None,
-                'streamflow_window': json.dumps(streamflow_window.values.tolist()) if streamflow_window is not None else None
+                'best_corr_var_window': json.dumps(best_corr_var_window.values.tolist()) 
+                                        if best_corr_var_window is not None else None,
+                'streamflow_window': json.dumps(streamflow_window.values.tolist()) 
+                                    if streamflow_window is not None else None
             })
         else:
             event_data.update({
@@ -475,10 +546,47 @@ def read_high_flow_events(filepath):
 
     return gdf
 
+def align_cubic_grid_tiles(data_t3, data_t5):
+
+    direction_t3_to_t5 = {
+    0: 0,
+    1: 3,
+    2: 4,
+    3: 5,
+    4: 6,
+    5: 7,
+    6: 8,
+    7: 1,
+    8: 2,
+    }
+    data_t3_new_dims = data_t3.rename_dims(
+    {'grid_yt': 'grid_y', 'grid_xt': 'grid_x'}
+    ).reset_index(['grid_yt', 'grid_xt']
+                  ).drop(['grid_xt', 'grid_yt']).transpose('grid_x', 'grid_y')
+    data_t3_new_dims = data_t3_new_dims.reindex(
+                        grid_x=data_t3_new_dims.grid_x[::-1], 
+                        grid_y=data_t3_new_dims.grid_y)
+    data_t5_new_dims = data_t5.rename_dims(
+        {'grid_yt': 'grid_x', 'grid_xt': 'grid_y'}
+        ).reset_index(['grid_yt', 'grid_xt']
+                    ).drop(['grid_xt', 'grid_yt']).transpose('grid_x', 'grid_y')
+    data_t5_new_dims = data_t5_new_dims.reindex(
+                        grid_x=data_t5_new_dims.grid_x, 
+                        grid_y=data_t5_new_dims.grid_y)
+    if 'rv_dir' in data_t3_new_dims.variables:
+        data_t3_new_dims['rv_dir'] = xr.apply_ufunc(
+            np.vectorize(direction_t3_to_t5.get),
+            data_t3_new_dims['rv_dir']
+        ).astype(float)
+    data_new_dims = xr.concat([data_t3_new_dims, data_t5_new_dims], dim='grid_y')
+    data_new_dims['grid_x'] = np.arange(1, data_new_dims.grid_x.size+1)
+    data_new_dims['grid_y'] = np.arange(1, data_new_dims.grid_y.size+1)
+    return data_new_dims
+
 def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Process high flow events for a given year and experiment')
-    parser.add_argument('--year', type=int, help='Year to process', default=1980)
+    parser.add_argument('--year', type=int, help='Year to process', default=2018)
     parser.add_argument('--exp_name', type=str, help='Experiment name', default='c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min')
     
     # Parse arguments
@@ -511,7 +619,7 @@ def main():
     flow_threshold = xr.open_dataarray(
         f'/archive/Marc.Prange/discharge_statistics/'
         f'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min/flow_1p0_year-1_threshold_'
-        f'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min_1980_2019.nc')
+        f'c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min_1951_2020.nc')
     flow_threshold = lon_180_to_360(sel_conus_land(flow_threshold))
 
     # Load clim mean flow velocities
@@ -522,28 +630,33 @@ def main():
         f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
         f'pp/river/av/monthly_42yr/river.1979-2020.*.nc')['rv_o_h2o'].groupby('time.month').mean('time').load()
     # Load static datasets
-    river_static_t3 = xr.open_dataset(
-        f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/river_cubic/river_cubic.static.tile3.nc').load()
-    river_static_t5 = xr.open_dataset(
-        f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/river_cubic/river_cubic.static.tile5.nc').load()
-    land_static_t5 = xr.open_dataset(
-        f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/land_cubic/land_cubic.static.tile5.nc').load()
-    land_static_t3 = xr.open_dataset(
-        f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/land_cubic/land_cubic.static.tile3.nc').load()
-    land_static = xr.open_dataset(
-        f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
-        f'pp/land/land.static.nc').load()
-    river_static_cubic = xr.concat([river_static_t3, river_static_t5], dim='grid_yt').transpose('grid_xt', 'grid_yt')
-    river_static_cubic['grid_yt'] = np.arange(1, river_static_cubic.grid_yt.size+1)
-    land_static_cubic = xr.concat([land_static_t3, land_static_t5], dim='grid_yt').transpose('grid_xt', 'grid_yt')
-    land_static_cubic['grid_yt'] = np.arange(1, land_static_cubic.grid_yt.size+1)
+    river_static_t3 = load_static_cubic_data(exp_name, sphere='river', tiles=['tile3'])
+    river_static_t5 = load_static_cubic_data(exp_name, sphere='river', tiles=['tile5'])
+    land_static_t3 = load_static_cubic_data(exp_name, sphere='land', tiles=['tile3'])
+    land_static_t5 = load_static_cubic_data(exp_name, sphere='land', tiles=['tile5'])
+    river_static_t3 = river_static_t3.assign_coords(
+        geolon_t=land_static_t3['geolon_t'], geolat_t=land_static_t3['geolat_t']).load()
+    river_static_t5 = river_static_t5.assign_coords(
+        geolon_t=land_static_t5['geolon_t'], geolat_t=land_static_t5['geolat_t']).load()
+    river_static_cubic = align_cubic_grid_tiles(river_static_t3, river_static_t5)
+    land_static_cubic = align_cubic_grid_tiles(land_static_t3, land_static_t5)
+    rv_dir_to_dij = {
+        0: (0,0),
+        1: (0,1),
+        2: (-1,1),
+        3: (-1,0),
+        4: (-1,-1),
+        5: (0,-1),
+        6: (1,-1),
+        7: (1,0),
+        8: (1,1)
+    }
     geolat_cubic = land_static_cubic.geolat_t
     geolon_cubic = land_static_cubic.geolon_t
-    river_dir_cubic = river_static_cubic.rv_dir
+    river_dir_cubic = river_static_cubic.rv_dir.astype(float)
+    land_static = xr.open_dataset(
+        f'{base_path}{exp_name}/gfdl.ncrc5-intel23-classic-prod-openmp/'
+        f'pp/land/land.static.nc')
     land_area = land_static.land_area
 
     # Calculate high flow mask
@@ -573,17 +686,17 @@ def main():
         print(f"Processing high flow event {i_high_flow+1}/{len(high_flow_time_lat_lon)}:", flush=True)
         print(f"Time: {time_high_flow}", flush=True)
         print(f"Regular Grid - Lat: {lat_high_flow_reg}, Lon: {lon_high_flow_reg}", flush=True)
-        print(f"Cubic Grid - Lat: {lat_high_flow_cubic}, Lon: {lon_high_flow_cubic}", flush=True)
+        # print(f"Cubic Grid - Lat: {lat_high_flow_cubic}, Lon: {lon_high_flow_cubic}", flush=True)
         
         # Find basin
-        basin_ij = find_basin(river_dir_cubic, igrid, jgrid)
+        basin_ij = find_basin(river_dir_cubic, igrid, jgrid, rv_dir_to_dij, max_basin_size=500)
         basin_lat_cubic = np.array([geolat_cubic[i, j] 
                               for i, j in zip(basin_ij[:, 0], basin_ij[:, 1])])
         basin_lon_cubic = np.array([geolon_cubic[i, j] 
                               for i, j in zip(basin_ij[:, 0], basin_ij[:, 1])])
         print(f"Basin size: {len(basin_lat_cubic)} pixels.", flush=True)
-        # if len(basin_lat_cubic) < 8:
-        #     continue
+        if len(basin_lat_cubic) < 10:
+            continue
         basin_lon_lat_cubic = np.vstack([basin_lon_cubic, basin_lat_cubic]).T
         basin_polygon_cubic = MultiPoint(basin_lon_lat_cubic).buffer(
                                 0.55, cap_style='square', join_style='mitre').buffer(
@@ -601,22 +714,23 @@ def main():
                 lat_high_flow_reg, lon_high_flow_cubic, lat_high_flow_cubic, basin_polygon_cubic, 
                 basin_polygon_cubic, interior_basin_rings_cubic, 
                 save_path=f'plots/high_low_flow_stat_plots/'
-                        f'attribution_tests/upstream_basin_map.png')
-            plot_streamflow_timeseries(
-                streamflow_data=daily_data_reg[flow_var], precip_data=daily_data_reg[precip_var], 
-                high_flow_mask=high_flow_mask, high_flow_time=time_high_flow,
-                location=(lat_high_flow_reg, lon_high_flow_reg), 
-                save_path=f'plots/high_low_flow_stat_plots/'
-                        f'attribution_tests/annual_streamflow_timeseries.png')
+                        f'attribution_tests/upstream_basin_map.png') 
         
         # Extract upstream precipitation, snow cover change and streamflow
         (upstream_precip_sum, upstream_ar_precip_sum, upstream_melt_sum, streamflow, 
          upstream_flow_velocity_mean, monthly_mean_streamflow, upstream_land_area_sum,) = \
-            calculate_upstream_variables(
+        calculate_upstream_variables(
                 daily_data_reg, land_area, basin_lat_reg, basin_lon_reg,
                 lat_high_flow_reg, lon_high_flow_reg, precip_var, ar_precip_var, 
                 snow_var, monthly_mean_flow_velocity, monthly_mean_streamflow)
-        
+        if do_test_plots:
+            plot_streamflow_timeseries(
+                streamflow_data=streamflow, precip_data=upstream_precip_sum, 
+                ar_precip_data=upstream_ar_precip_sum, melt_data=upstream_melt_sum,
+                high_flow_mask=high_flow_mask, high_flow_time=time_high_flow,
+                location=(lat_high_flow_reg, lon_high_flow_reg), 
+                save_path=f'plots/high_low_flow_stat_plots/'
+                        f'attribution_tests/annual_streamflow_timeseries.png')
         # Calculate length scale of upstream basin and streamflow timescale
         upstream_length_scale = np.sqrt(upstream_land_area_sum/np.pi) # m^2
         high_stream_flow = streamflow.sel(time=time_high_flow)
@@ -632,14 +746,18 @@ def main():
             plot_lagged_timeseries=do_test_plots)
         # Print report of correlation results
         print(f"Correlation results for high flow event {i_high_flow+1}/{len(high_flow_time_lat_lon)}:", flush=True)
-        if correlation[2] == 'ar_precip':
-            print(f"Best correlation with AR precipitation: {correlation[1]:.2f} at lag {correlation[0]} days", flush=True)
-        elif correlation[2] == 'precip':
-            print(f"Best correlation with precipitation: {correlation[1]:.2f} at lag {correlation[0]} days", flush=True)
-        elif correlation[2] == 'melt':
-            print(f"Best correlation with melt: {correlation[1]:.2f} at lag {correlation[0]} days", flush=True)
+        if correlation[0] == 'ar_precip':
+            print(f"Best correlation with AR precipitation: {correlation[1]:.2f} at lag {correlation[2]} days\n", flush=True)
+        elif correlation[0] == 'precip':
+            print(f"Best correlation with precipitation: {correlation[1]:.2f} at lag {correlation[2]} days\n", flush=True)
+        elif correlation[0] == 'melt':
+            print(f"Best correlation with melt: {correlation[1]:.2f} at lag {correlation[2]} days\n", flush=True)
+        elif correlation[0] == 'ar_precip_melt':
+            print(f"Best correlation with AR precipitation-melt: {correlation[1]:.2f} at lag {correlation[2]} days\n", flush=True)
+        elif correlation[0] == 'precip_melt':
+            print(f"Best correlation with precipitation-melt: {correlation[1]:.2f} at lag {correlation[2]} days\n", flush=True)
         else: 
-            print("No significant correlation found.", flush=True)
+            print("No significant correlation found.\n", flush=True)
         # Collect results
         event_result = {
             'event': i_high_flow + 1,
