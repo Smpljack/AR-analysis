@@ -15,6 +15,34 @@ exp_basepath_map = {
         'c192_obs': '/archive/Ming.Zhao/awg/2022.03/'
     }
 
+def store_monthly_albedo(exp_name, out_path):
+    albedo_dir = xr.open_mfdataset(
+        f'{exp_basepath_map[exp_name]}{exp_name}/'
+        'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land/ts/monthly/1yr/'
+        'land.*01-*12.albedo_dir.nc')
+    start_year = str(albedo_dir.time[0].values)[:4]
+    end_year = str(albedo_dir.time[-1].values)[:4]
+    albedo_dif = xr.open_mfdataset(
+        f'{exp_basepath_map[exp_name]}{exp_name}/'
+        'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land/ts/monthly/1yr/'
+        'land.*01-*12.albedo_dif.nc')
+    start_year = str(albedo_dif.time[0].values)[:4]
+    end_year = str(albedo_dif.time[-1].values)[:4]
+    albedo_dir.to_netcdf(
+        f'{out_path}{exp_name}/ts_all/land.{start_year}01-{end_year}12.albedo_dir.nc')
+    albedo_dif.to_netcdf(
+        f'{out_path}{exp_name}/ts_all/land.{start_year}01-{end_year}12.albedo_dif.nc')
+
+def store_monthly_grnd_flux(exp_name, out_path):
+    grnd_flux = xr.open_mfdataset(
+        f'{exp_basepath_map[exp_name]}{exp_name}/'
+        'gfdl.ncrc5-intel23-classic-prod-openmp/pp/land/ts/monthly/1yr/'
+        'land.*01-*12.grnd_flux.nc')
+    start_year = str(grnd_flux.time[0].values)[:4]
+    end_year = str(grnd_flux.time[-1].values)[:4]
+    grnd_flux.to_netcdf(
+        f'{out_path}{exp_name}/ts_all/land.{start_year}01-{end_year}12.grnd_flux.nc')
+
 def store_monthly_plevel_winds(exp_name, plevels, out_path):
     u = xr.open_mfdataset(
         f'{exp_basepath_map[exp_name]}{exp_name}/ts_all/atmos.*.ucomp.nc')
@@ -30,28 +58,34 @@ def store_monthly_plevel_winds(exp_name, plevels, out_path):
         vlevel.to_netcdf(
             f'{out_path}{exp_name}/ts_all/atmos.{start_year}01-{end_year}12.v_{plevel}.nc')
 
-def store_monthly_precip_intensity_frequency(exp_name, out_path, vars=['pr', 'prsn'], subset='atmos'):
+def store_monthly_precip_intensity_frequency(
+        exp_name, out_path, vars=['pr', 'prsn'], subset='atmos', ar_day_mean=False):
     for var in vars:
         if exp_name == 'c192_obs':
-            if var == 'ar_precipitation':
+            if var == 'ar_precip':
                 ar_analysis = True
-                load_var = 'precipitation'
-            else:
+                load_var = 'precip'
+            elif var == 'precip':
                 ar_analysis = False 
+                load_var = 'precip'
             pr = du.load_obs_data(
                 'archive/Ming.Zhao/awg/2022.03/', year='*', 
                 era5_variables=None, exp_name=exp_name, 
                 ar_analysis=ar_analysis, obs_pr_dataset=subset,
-                min_pr_threshold=1/86400,
+                min_ar_pr_threshold=1/86400,
                 low_pr_value=0,
-                min_pr_var='precipitation',
-                ar_masked_vars=['precipitation'],
+                min_pr_var='precip',
+                ar_masked_vars=['precip'],
                 lon_180=False).sortby(
-                    'time').transpose('time', 'lat', 'lon', 'bnds')
+                    'time')
         else:
-            if var == 'ar_pr':
+            if var == 'ar_precip':
                 ar_analysis = True
-                load_var = 'pr'
+                load_var = 'precip'
+                if ar_day_mean:
+                    low_pr_value = np.nan
+                else:
+                    low_pr_value = 0
             else:
                 ar_analysis = False
             pr = du.load_model_data(
@@ -59,8 +93,8 @@ def store_monthly_precip_intensity_frequency(exp_name, out_path, vars=['pr', 'pr
                     exp_name=exp_name,
                     ar_analysis=ar_analysis,
                     min_ar_pr_threshold=1/86400,
-                    low_pr_value=0,
-                    min_pr_var='pr',
+                    low_pr_value=low_pr_value,
+                    min_pr_var='precip',
                     ar_masked_vars=[load_var],
                     gfdl_processor='gfdl*',
                     lon_180=False)
@@ -73,19 +107,27 @@ def store_monthly_precip_intensity_frequency(exp_name, out_path, vars=['pr', 'pr
                 f'{out_path}{exp_name}/ts_all/{subset}.{start_year}01-{end_year}12.{var}_intensity.nc')
         pr_frequency_monthly.to_netcdf(
                 f'{out_path}{exp_name}/ts_all/{subset}.{start_year}01-{end_year}12.{var}_frequency.nc')
-        if var == 'ar_pr':
-            ar_pr_monthly = pr[var].resample(time="1MS").mean(dim="time").rename(f'{var}')
+        if var == 'ar_precip':
+            if ar_day_mean:
+                rename_var = 'ar_day_precip'
+            else:
+                rename_var = 'ar_precip'
+            ar_pr_monthly = pr[var].resample(time="1MS").mean(dim="time").rename(rename_var)
             ar_pr_monthly.to_netcdf(
-                f'{out_path}{exp_name}/ts_all/{subset}.{start_year}01-{end_year}12.{var}.nc')
+                f'{out_path}{exp_name}/ts_all/{subset}.{start_year}01-{end_year}12.{rename_var}.nc')
         if exp_name == 'c192_obs':
-            pr_mean_monthly = pr[var].resample(time="1MS").mean(dim="time").rename('precip')
-            pr_mean_monthly.to_netcdf(
-                f'{out_path}{exp_name}/ts_all/{subset}.{start_year}01-{end_year}12.precip.nc')
-
+            if var == 'ar_precip':
+                pr_mean_monthly = pr[var].resample(time="1MS").mean(dim="time").rename('ar_precip')
+                pr_mean_monthly.to_netcdf(
+                    f'{out_path}{exp_name}/ts_all/{subset}.{start_year}01-{end_year}12.ar_precip.nc')
+            else:
+                pr_mean_monthly = pr[var].resample(time="1MS").mean(dim="time").rename('precip')
+                pr_mean_monthly.to_netcdf(
+                    f'{out_path}{exp_name}/ts_all/{subset}.{start_year}01-{end_year}12.precip.nc')
 
 def _main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp_name", type=str, default='c192L33_am4p0_amip_HIRESMIP_HX_p2K')
+    parser.add_argument("--exp_name", type=str, default='c192L33_am4p0_amip_HIRESMIP_nudge_wind_30min_p2K')
     args = parser.parse_args()
     exp_name = args.exp_name
     # store_monthly_plevel_winds(
@@ -93,12 +135,16 @@ def _main():
     #     plevels=[700, 250],
     #     out_path='/archive/Marc.Prange/ts_all_missing_vars/'
     # )
-    store_monthly_precip_intensity_frequency(
+    # store_monthly_precip_intensity_frequency(
+    #     exp_name=exp_name,
+    #     out_path='/archive/Marc.Prange/ts_all_missing_vars/',
+    #     vars=['ar_precip', 'precip'],
+    #     subset='imerg'
+    #     )
+    store_monthly_grnd_flux(
         exp_name=exp_name,
-        out_path='/archive/Marc.Prange/ts_all_missing_vars/',
-        vars=['ar_pr'],
-        subset='atmos_cmip'
-        )
+        out_path='/archive/Marc.Prange/ts_all_missing_vars/'
+    )
 
 
 if __name__ == '__main__':
